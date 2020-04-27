@@ -268,13 +268,13 @@ test "BumpDownAllocator" {
         testBlockAllocator(&Alloc.bumpDown(alignment, &buf).aligned().init);
         if (comptime alignment == 1) {
             testSliceAllocator(&Alloc.bumpDown(alignment, &buf).slice().init);
-            testSliceAllocator(&Alloc.bumpDown(alignment, &buf).aligned().slice().init);
+            //testSliceAllocator(&Alloc.bumpDown(alignment, &buf).blockAligned().slice().init);
         } else {
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).aligned().precise().init);
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).precise().aligned().init);
-            testSliceAllocator(&Alloc.bumpDown(alignment, &buf).precise().slice().init);
-            testSliceAllocator(&Alloc.bumpDown(alignment, &buf).precise().aligned().slice().init);
-            testSliceAllocator(&Alloc.bumpDown(alignment, &buf).aligned().precise().slice().init);
+            //testSliceAllocator(&Alloc.bumpDown(alignment, &buf).precise().blockAligned().slice().init);
+            //testSliceAllocator(&Alloc.bumpDown(alignment, &buf).precise().blockAligned().aligned().slice().init);
+            //testSliceAllocator(&Alloc.bumpDown(alignment, &buf).blockAligned().aligned().precise().slice().init);
         }
     }
 }
@@ -288,12 +288,14 @@ test "BumpDownAllocator" {
 ///     // a field to hold the extra data for the block
 ///     extra: Extra,
 ///
+///     // buf is many-pointer if hasLen is false, or a slice if hasLen is true
+///     pub fn init(buf: var, extra: Extra) @This() { ... }
 ///     // returns a pointer to the memory owned by the block
 ///     pub fn ptr(self: @This()) [*]align(alignment) u8 { ... }
-///
 ///     // if hasLen is true, a function to return the length of the memory owned by the block
 ///     // and a function to return the memory owned by the block as a slice
 ///     pub fn len(self: @This()) usize { ... }
+///     pub fn lenRef(self: *@This()) *usize { ... }
 ///     pub fn slice(self: @This()) []align(alignment) u8 { ... }
 ///
 pub fn MakeBlockType(
@@ -307,13 +309,16 @@ pub fn MakeBlockType(
 ) type {
     if (!isValidAlign(alignment_)) @compileError("invalid alignment");
     return struct {
+        const Buf = if (hasLen_) [] align(alignment_) u8
+                    else         [*]align(alignment_) u8;
         pub const hasLen = hasLen_;
         pub const alignment = alignment_;
         pub const Extra = Extra_;
 
-        buf: if (hasLen_) [] align(alignment_) u8
-             else         [*]align(alignment_) u8,
+        buf: Buf,
         extra: Extra,
+
+        pub fn init(buf: Buf, extra: Extra) @This() { return .{ .buf = buf, .extra = extra }; }
 
         pub fn ptr(self: @This()) [*]align(alignment) u8 {
             if (hasLen)
@@ -329,6 +334,7 @@ pub fn MakeBlockType(
             if (!hasLen) @compileError("cannot call .len() on this Block type because hasLen is false");
             return self.buf.len;
         }
+        pub fn lenRef(self: *@This()) *usize { return &self.buf.len; }
     };
 }
 
@@ -802,10 +808,14 @@ pub fn PreciseAllocator(comptime T: type) type {
             pub const hasLen = true;
             pub const alignment = T.Block.alignment;
             pub const Extra = T.Block;
+            pub fn init(buf: []align(alignment) u8, extra: Extra) @This() {
+                return @This() { .unalignedLen = buf.len, .extra = extra };
+            }
             pub fn ptr(self: @This()) [*]align(alignment) u8 {
                 return self.extra.ptr();
             }
             pub fn len(self: @This()) usize { return self.unalignedLen; }
+            pub fn lenRef(self: *@This()) *usize { return &self.unalignedLen; }
             pub fn slice(self: @This()) []align(alignment) u8 { return self.ptr()[0..self.unalingedLen]; }
         };
 
@@ -1034,66 +1044,51 @@ pub fn makeSliceAllocatorGeneric(allocator: var, comptime storeBlock: bool) Slic
     };
 }
 pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type {
+    // The purpose of SliceAllocator is to provide a simple slice-based API.  This means it
+    // only need to support precise allocation.
     if (implements(T, "alignForward"))
         @compileError("SliceAllocator cannot wrap imprecise allocator '" ++ @typeName(T) ++ "'. Wrap it with a PreciseAllocator.");
     if (@sizeOf(T.Block.Extra) > 0 and !storeBlock)
         @compileError("storeBlock must be set to true for " ++ @typeName(T) ++ " because it has extra data");
-    const Block = if (!storeBlock) T.Block else
-        MakeBlockType(T.Block.hasLen, T.Block.alignment, struct { forwardBlock: T.Block });
     return struct {
         const SelfRef = if (@sizeOf(T) == 0) @This() else *@This();
-        pub const alignment = Block.alignment;
+        pub const alignment = T.Block.alignment;
         allocator: T,
 
         usingnamespace if (!storeBlock) struct {
             /// The size needed to pad each allocation to store the Block
             pub const allocPadding = 0;
 
-            pub fn getConstBlockRef(slice: *const []align(alignment) u8) *const Block {
-                if (comptime Block.hasLen)
-                    return @ptrCast(*const Block, slice);
-                return @ptrCast(*const Block, &slice.ptr);
-            }
-            pub fn getBlockRef(slice: *[]align(alignment) u8) *Block {
-                if (comptime Block.hasLen)
-                    return @ptrCast(*Block, slice);
-                return @ptrCast(*Block, &slice.ptr);
-            }
-            pub fn getConstForwardBlockRef(block: *const Block) *const T.Block {
-                return block;
-            }
-            pub fn getForwardBlockRef(block: *Block) *T.Block {
-                return block;
+            const BlockRef = struct {
+                block: T.Block,
+                pub fn blockPtr(self: *@This()) *T.Block { return &self.block; }
+            };
+            pub fn getBlockRef(slice: []align(alignment) u8) BlockRef {
+                return .{ .block = T.Block.init(if (T.Block.hasLen) slice else slice.ptr, .{}) };
             }
         } else struct {
             /// The size needed to pad each allocation to store the Block
-            pub const allocPadding = @sizeOf(Block) + @alignOf(Block) - 1;
+            pub const allocPadding = @sizeOf(T.Block) + @alignOf(T.Block) - 1;
 
-            pub fn getConstBlockRef(slice: *const []align(alignment) u8) *const Block {
-                return getStoredBlockRef(slice.*);
-            }
-            pub fn getBlockRef(slice: *const []align(alignment) u8) *Block {
-                return getStoredBlockRef(slice.*);
-            }
-            pub fn getConstForwardBlockRef(block: *const Block) *const T.Block {
-                return &block.extra.forwardBlock;
-            }
-            pub fn getForwardBlockRef(block: *Block) *T.Block {
-                return &block.extra.forwardBlock;
+            const BlockRef = struct {
+                refPtr: *T.Block,
+                pub fn blockPtr(self: @This()) *T.Block { return self.refPtr; }
+            };
+            // only available if storeBlock is true, can accept non-ref slices
+            pub fn getBlockRef(slice: []align(alignment) u8) BlockRef {
+                return .{ .refPtr = getStoredBlockRef(slice) };
             }
 
             // only available if storeBlock is true, can accept non-ref slices
-            pub fn getStoredBlockRef(slice: []align(alignment) u8) *Block {
-                return @intToPtr(*Block, mem.alignForward(@ptrToInt(slice.ptr) + slice.len, @alignOf(Block)));
+            pub fn getStoredBlockRef(slice: []align(alignment) u8) *T.Block {
+                return @intToPtr(*T.Block, mem.alignForward(@ptrToInt(slice.ptr) + slice.len, @alignOf(T.Block)));
             }
             pub fn debugDumpBlock(slice: []align(alignment) u8) void {
-                const blockRef = getStoredBlockRef(buf);
+                const blockPtr = getStoredBlockRef(buf);
                 if (ForwardBlock.hasLen) {
-                    std.debug.warn("BLOCK: {}:{} forward {}:{}\n", .{blockRef.ptr(), blockRef.len(),
-                        blockRef.extra.forwardBlock.ptr(), blockRef.extra.forwardBlock.len()});
+                    std.debug.warn("BLOCK: {}:{}\n", .{blockPtr.ptr(), blockPtr.len()});
                 } else {
-                    std.debug.warn("BLOCK: {} forward {}\n", .{blockRef.ptr(),
-                        blockRef.extra.forwardBlock.ptr()});
+                    std.debug.warn("BLOCK: {}\n", .{blockPtr.ptr()});
                 }
             }
         };
@@ -1103,15 +1098,10 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
             // NOTE: paddedLen will be valid because SliceAllocator checks that T does not implement alignForward
             assert(comptime !implements(T, "alignForward"));
             const block = try self.allocator.allocBlock(paddedLen);
-            if (comptime Block.hasLen) assert(block.len() == paddedLen);
+            if (comptime T.Block.hasLen) assert(block.len() == paddedLen);
             const slice = block.ptr()[0..len];
-            if (comptime storeBlock) {
-                if (comptime Block.hasLen) {
-                    getStoredBlockRef(slice).* = Block { .buf = slice    , .extra = .{.forwardBlock = block} };
-                } else {
-                    getStoredBlockRef(slice).* = Block { .buf = slice.ptr, .extra = .{.forwardBlock = block} };
-                }
-            }
+            if (storeBlock)
+                getBlockRef(slice).blockPtr().* = block;
             return slice;
         }
         pub usingnamespace if (!implements(T, "allocOverAlignedBlock")) struct {
@@ -1123,16 +1113,11 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 assert(allocAlign > alignment);
                 const paddedLen = len + allocPadding;
                 const block = try self.allocator.allocOverAlignedBlock(paddedLen, allocAlign);
-                if (comptime Block.hasLen) assert(block.len() == paddedLen);
+                if (comptime T.Block.hasLen) assert(block.len() == paddedLen);
                 assert(mem.isAligned(@ptrToInt(block.ptr()), allocAlign));
                 const slice = block.ptr()[0..len];
-                if (comptime storeBlock) {
-                    if (comptime T.Block.hasLen) {
-                        getStoredBlockRef(slice).* = Block { .buf = slice    , .extra = .{.forwardBlock = block} };
-                    } else {
-                        getStoredBlockRef(slice).* = Block { .buf = slice.ptr, .extra = .{.forwardBlock = block} };
-                    }
-                }
+                if (storeBlock)
+                    getBlockRef(slice).blockPtr().* = block;
                 return slice;
             }
         };
@@ -1142,69 +1127,69 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
             return self.allocOverAligned(len, allocAlign);
         }
         pub fn dealloc(self: SelfRef, slice: []align(alignment) u8) void {
-            deallocBlockIfSupported(&self.allocator, getConstForwardBlockRef(getConstBlockRef(&slice)).*);
+            deallocBlockIfSupported(&self.allocator, getBlockRef(slice).blockPtr().*);
         }
         pub usingnamespace if (!implements(T, "extendBlockInPlace")) struct {
             pub const extendInPlace = void;
         } else struct {
             pub fn extendInPlace(self: SelfRef, slice: []align(alignment) u8, new_len: usize) error{OutOfMemory}!void {
                 assert(new_len > slice.len);
-                var mutableSlice = slice;
-                var blockRef = getBlockRef(&mutableSlice);
+
+                var blockRef = getBlockRef(slice);
+                const blockPtr = blockRef.blockPtr();
                 if (storeBlock) {
-                    assert(slice.ptr == blockRef.ptr());
-                    if (Block.hasLen) assert(slice.len == blockRef.len());
+                    assert(slice.ptr == blockPtr.ptr());
+                    if (T.Block.hasLen) assert(slice.len + allocPadding == blockPtr.len());
                 }
                 const paddedLen = new_len + allocPadding;
                 const extendNeeded =
-                    if (comptime !storeBlock or !Block.hasLen) true
-                    else paddedLen > blockRef.extra.forwardBlock.len();
+                    if (comptime !storeBlock or !T.Block.hasLen) true
+                    else paddedLen > blockPtr.len();
 
                 if (extendNeeded) {
-                    try self.allocator.extendBlockInPlace(getForwardBlockRef(blockRef), paddedLen);
-                    if (T.Block.hasLen) {
-                        assert(getForwardBlockRef(blockRef).len() == paddedLen);
-                    }
+                    try self.allocator.extendBlockInPlace(blockPtr, paddedLen);
+                    if (T.Block.hasLen)
+                        assert(blockPtr.len() == paddedLen);
                 }
                 if (storeBlock) {
-                    const newBlockRef = getStoredBlockRef(slice.ptr[0..new_len]);
-                    // NOTE: must be memcpyAscending in case of overlap
-                    memcpyAscending(@ptrCast([*]u8, newBlockRef), @ptrCast([*]u8, blockRef), @sizeOf(Block));
-                    assert(newBlockRef.ptr() == slice.ptr);
-                    if (Block.hasLen)
-                        newBlockRef.buf.len = new_len;
+                    const newBlockPtr = getStoredBlockRef(slice.ptr[0..new_len]);
+                    // NOTE: must be memcpyBackward in case of overlap
+                    memcpyBackward(@ptrCast([*]u8, newBlockPtr), @ptrCast([*]u8, blockPtr), @sizeOf(T.Block));
+                    assert(newBlockPtr.ptr() == slice.ptr);
+                    if (T.Block.hasLen)
+                        newBlockPtr.lenRef().* = new_len;
                 }
             }
         };
-        // TODO: maybe also check if the BlockAllocator implements shrinkBlockInPlace
-        pub usingnamespace if (!storeBlock) struct {
-            pub const shrinkInPlace = void;
-        } else struct {
-            pub fn shrinkInPlace(self: SelfRef, slice: []align(alignment) u8, new_len: usize) void {
-                assert(new_len > 0);
-                assert(new_len < slice.len);
-                if (comptime !storeBlock) {
-                    // TODO: support the case where self.allocator implements shrinkBlockInPlace
-                    @compileError("shrinkInPlace not implemented for SliceAllocator that doesn't store the Block: " ++ @typeName(T));
-                } else {
-                    // make a copy of the block so we don't lose it during the shrink
-                    var block = getStoredBlockRef(slice).*;
-                    assert(slice.ptr == block.ptr());
-                    if (Block.hasLen)
-                        assert(slice.len == block.buf.len);
-                    if (comptime false) {//implements(T, "shrinkBlockInPlace")) {
-                        const paddedLen = new_len + allocPadding;
-                        try self.allocator.shrinkBlockInPlace(&block.extra.forwardBlock, paddedLen);
-                        // whether or not the shrink works, we cannot fail and need to track the new length
-                        if (Block.hasLen)
-                            assert(block.extra.forwardBlock.len() == paddedLen);
-                    }
-                    if (Block.hasLen)
-                        block.buf.len = new_len;
-                    getStoredBlockRef(slice.ptr[0..new_len]).* = block;
-                }
-            }
-        };
+//        // TODO: maybe also check if the BlockAllocator implements shrinkBlockInPlace
+//        pub usingnamespace if (!storeBlock) struct {
+//            pub const shrinkInPlace = void;
+//        } else struct {
+//            pub fn shrinkInPlace(self: SelfRef, slice: []align(alignment) u8, new_len: usize) void {
+//                assert(new_len > 0);
+//                assert(new_len < slice.len);
+//                if (comptime !storeBlock) {
+//                    // TODO: support the case where self.allocator implements shrinkBlockInPlace
+//                    @compileError("shrinkInPlace not implemented for SliceAllocator that doesn't store the Block: " ++ @typeName(T));
+//                } else {
+//                    // make a copy of the block so we don't lose it during the shrink
+//                    var blockCopy = getStoredBlockRef(slice).*;
+//                    assert(slice.ptr == blockCopy.ptr());
+//                    if (T.Block.hasLen)
+//                        assert(slice.len == blockCopy.len());
+//                    if (comptime false) {//implements(T, "shrinkBlockInPlace")) {
+//                        const paddedLen = new_len + allocPadding;
+//                        try self.allocator.shrinkBlockInPlace(&blockCopy, paddedLen);
+//                        // whether or not the shrink works, we cannot fail and need to track the new length
+//                        if (T.Block.hasLen)
+//                            assert(blockCopy.len() == paddedLen);
+//                    }
+//                    if (T.Block.hasLen)
+//                        blockCopy.lenRef().* = new_len;
+//                    getStoredBlockRef(slice.ptr[0..new_len]).* = blockCopy;
+//                }
+//            }
+//        };
 
 //        pub usingnamespace if (!reallocBlockSupported(T)) struct {
 //            pub const realloc = void;
@@ -1215,7 +1200,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
 //                var oldBlockRef = getConstBlockRef(&slice);
 //                if (storeBlock) {
 //                    assert(slice.ptr == oldBlockRef.ptr());
-//                    if (Block.hasLen) assert(slice.len == oldBlockRef.len());
+//                    if (T.Block.hasLen) assert(slice.len == oldBlockRef.len());
 //                }
 //                const paddedLen = new_len + allocPadding;
 //                // make a copy of the block, we will need this in case the memory
@@ -1237,9 +1222,15 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
     };
 }
 
-/// TODO: this shouldn't be in this module
-fn memcpyAscending(dst: [*]u8, src: [*]u8, len: usize) void {
+/// TODO: these shouldn't be in this module
+fn memcpyForward(dst: [*]u8, src: [*]u8, len: usize) void {
      {var i : usize = 0; while (i < len) : (i += 1) {
+         dst[i] = src[i];
+     }}
+}
+fn memcpyBackward(dst: [*]u8, src: [*]u8, len: usize) void {
+     {var i : usize = len; while (i > 0) {
+         i -= 1;
          dst[i] = src[i];
      }}
 }
@@ -1391,24 +1382,25 @@ fn testSliceAllocator(allocator: var) void {
         }}
     }
     if (comptime implements(T, "extendInPlace")) {
-        {var i: u8 = 1; while (i < 200) : (i += 14) {
+        {var i: u8 = 1; while (i < 200) : (i += 1) {
             var slice = allocator.alloc(i) catch continue;
             defer allocator.dealloc(slice);
-            allocator.extendInPlace(slice, i + 1) catch continue;
-            slice = slice.ptr[0..i+1];
-            testReadWrite(slice.ptr[0..i+1], i);
+            const extendLen = i + 2;
+            allocator.extendInPlace(slice, extendLen) catch continue;
+            slice = slice.ptr[0..extendLen];
+            testReadWrite(slice, extendLen);
         }}
     }
-    if (comptime implements(T, "shrinkInPlace")) {
-        {var i: u8 = 2; while (i < 200) : (i += 14) {
-            var slice = allocator.alloc(i) catch continue;
-            defer allocator.dealloc(slice);
-            testReadWrite(slice, i);
-            allocator.shrinkInPlace(slice, i - 1);
-            slice = slice[0..i-1];
-            testReadWrite(slice, i);
-        }}
-    }
+//    if (comptime implements(T, "shrinkInPlace")) {
+//        {var i: u8 = 2; while (i < 200) : (i += 14) {
+//            var slice = allocator.alloc(i) catch continue;
+//            defer allocator.dealloc(slice);
+//            testReadWrite(slice, i);
+//            allocator.shrinkInPlace(slice, i - 1);
+//            slice = slice[0..i-1];
+//            testReadWrite(slice, i);
+//        }}
+//    }
 //    if (comptime implements(T, "realloc")) {
 //        {var i: u8 = 2; while (i < 200) : (i += 14) {
 //            var slice = allocator.alloc(i) catch continue;
