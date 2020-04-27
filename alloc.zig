@@ -22,8 +22,8 @@
 ///     defer a.dealloc(s);
 ///
 /// This library allows every allocator to declare their individual-allocation storage
-/// requirements through a custom "Block" type. The Block type stores everything the
-/// allocator needs to track individual allocations. It could be just a pointer, or
+/// requirements through a custom "Block" type. The Block type can store any data the allocator
+/// wants to associate with individual allocations. It could be just a pointer, or
 /// just a slice, or a struct with many fields.
 ///
 /// Using alloctor-defined Block types allows the caller to determine where the Block
@@ -45,10 +45,9 @@
 /// Check the MakeBlockType function for notes on creating a Block type.
 /// Blocks are normally passed by value to the allocator, unless the allocator
 /// is going to modify it (i.e. extendBlockInPlace).
-/// The caller will access the memory pointer through a Block value through its `ptr()`
-/// member function.
-/// The pointer may also have an "align(X)" property that indicates all allocations from
-/// that allocator will always be aligned by X.
+/// The caller will access the memory pointer for a block by calling its `ptr()` function.
+/// The pointer can have an "align(X)" property to indicate all allocations from will be
+/// aligned by X.
 ///
 /// ### Allocation:
 ///
