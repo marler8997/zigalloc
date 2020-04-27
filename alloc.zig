@@ -42,9 +42,8 @@
 /// Implementing an Allocator
 /// ======================================================================================
 /// Every Allocator MUST define a pub struct type named 'Block'.
-/// You can define your own from scratch or use the MakeBlockType function to create this.
 /// Check the MakeBlockType function for notes on creating a Block type.
-/// Blocks are normally "passed by value" to the allocator, unless the allocator
+/// Blocks are normally passed by value to the allocator, unless the allocator
 /// is going to modify it (i.e. extendBlockInPlace).
 /// The caller will access the memory pointer through a Block value through its `ptr()`
 /// member function.
@@ -54,7 +53,7 @@
 /// ### Allocation:
 ///
 ///     1. fn alignForward(len: usize) usize
-///        Returns the next smallest valid length that is larger than `len`.  This function
+///        Returns the next smallest valid length that is >= `len`.  This function
 ///        allows a caller to know how big its allocation will be before calling allocBlock.
 ///        It must be a pure static function on the allocator type.
 ///        Length values must be aligned if an only if the allocator implements this function.
@@ -108,13 +107,16 @@
 ///
 ///     * extendBlockInPlace(block: *Block, new_len: usize) error{OutOfMemory}!void
 ///       assert(new_len > block.len());
+///       assert(new_len == alignForward(new_len)); // if alignForward is implemented
 ///       Extend a block without moving it.
+///       If the allocator implements alignForward, then `new_len` must be aligned by it.
 ///       Note that block is passed in by reference because the function can modify it.  If it is
 ///       modified, the caller must pass in the new version for all future calls.
 ///
 ///     * retractBlockInPlace(block: *Block, new_len: usize) error{OutOfMemory}!void
 ///       assert(new_len > 0);
 ///       assert(new_len < block.len());
+///       assert(new_len == alignForward(new_len)); // if alignForward is implemented
 ///       Retract a block without moving it.
 ///       Note that retract is equivalent to shrink except that it can fail and will fail if the
 ///       memory cannot be retracted.  If you just want to make a "best effort" to retract memory,
@@ -430,11 +432,13 @@ pub const MmapAllocator = struct {
     }
     pub fn extendBlockInPlace(self: @This(), block: *Block, new_len: usize) error{OutOfMemory}!void {
         assert(new_len > block.len());
+        assert(new_len == alignForward(new_len));
         return mremapInPlace(block, new_len);
     }
     pub fn retractBlockInPlace(self: @This(), block: *Block, new_len: usize) error{OutOfMemory}!void {
         assert(new_len > 0);
         assert(new_len < block.len());
+        assert(new_len == alignForward(new_len));
         return mremapInPlace(block, new_len);
     }
     pub const overrideReallocBlock = void;
@@ -509,23 +513,9 @@ pub fn BumpDownAllocator(comptime alignment : u29) type {return struct {
         self.bumpIndex = getStartBumpIndex(self.buf);
     }
     pub const deinitAndDeallocAll = void;
-    pub fn extendBlockInPlace(self: *@This(), block: *Block, new_len: usize) error{OutOfMemory}!void {
-        assert(new_len > block.len());
-        const alignedLen = mem.alignForward(block.len(), alignment);
-        if (new_len > alignedLen)
-            return error.OutOfMemory;
-        block.buf.len = new_len;
-    }
-    pub fn retractBlockInPlace(self: *@This(), block: *Block, new_len: usize) error{OutOfMemory}!void {
-        assert(new_len > 0);
-        assert(new_len < block.len());
-        // we must ensure that the aligned length remains the same
-        // in order ensure that deallocBlock in LIFO order always works
-        const minSize = mem.alignBackward(block.len(), alignment) + 1;
-        if (new_len < minSize)
-            return error.OutOfMemory;
-        block.buf.len = new_len;
-    }
+    /// BumpDown cannot extend/retract blocks, but BumpUp could extend/retract the last one
+    pub const extendBlockInPlace = void;
+    pub const retractBlockInPlace = void;
     pub const overrideReallocBlock = void;
 };}
 
@@ -882,7 +872,7 @@ pub fn PreciseAllocator(comptime T: type) type {
                 const callRetract = if (comptime !T.Block.hasLen) true
                     else alignedLen > block.extra.len();
                 if (callRetract) {
-                    try self.allocator.retractBlockInPlace(&block.extra, new_len);
+                    try self.allocator.retractBlockInPlace(&block.extra, alignedLen);
                     if (T.Block.hasLen)
                         assert(block.extra.len() == alignedLen);
                 }
@@ -1330,26 +1320,33 @@ pub fn testBlockAllocator(allocator: var) void {
     //       we aren't testing a specific instance
 
     if (comptime implements(T, "extendBlockInPlace")) {
-        blk: {
-            const len = alignLenForward(T, 1);
-            var block = allocator.allocBlock(len) catch break :blk;
+        {var i: u8 = 1; while (i < 100) : (i += 1) {
+            const len = alignLenForward(T, i);
+            assert(len >= i);
+            var block = allocator.allocBlock(len) catch continue;
             defer deallocBlockIfSupported(allocator, block);
             testReadWrite(block.ptr()[0..len], 125);
 
-            allocator.extendBlockInPlace(&block, len + 1) catch break :blk;
-            testReadWrite(block.ptr()[0..len + 1], 39);
-        }
+            const extendLen = alignLenForward(T, len + 1);
+            assert(extendLen >= len + 1);
+            allocator.extendBlockInPlace(&block, extendLen) catch continue;
+            testReadWrite(block.ptr()[0..extendLen], 39);
+        }}
     }
     if (comptime implements(T, "retractBlockInPlace")) {
-        blk: {
-            const len = alignLenForward(T, 2);
-            var block = allocator.allocBlock(len) catch break :blk;
-            defer deallocBlockIfSupported(allocator, block);
-            testReadWrite(block.ptr()[0..len], 18);
-
-            allocator.retractBlockInPlace(&block, len - 1) catch break :blk;
-            testReadWrite(block.ptr()[0..len - 1], 91);
-        }
+        const retractLen = alignLenForward(T, 1);
+        assert(retractLen >= 1);
+        {var i: u8 = 2; while (i < 100) : (i += 1) {
+            const len = alignLenForward(T, i);
+            assert(len >= i);
+            if (retractLen < len) {
+                var block = allocator.allocBlock(len) catch continue;
+                defer deallocBlockIfSupported(allocator, block);
+                testReadWrite(block.ptr()[0..len], 18);
+                allocator.retractBlockInPlace(&block, retractLen) catch continue;
+                testReadWrite(block.ptr()[0..retractLen], 91);
+            }
+        }}
     }
 
 //    if (comptime implements(T, "shrinkBlockInPlace")) {
