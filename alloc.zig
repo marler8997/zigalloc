@@ -77,15 +77,19 @@
 ///
 /// ### Alignment
 ///
-///     * allocOverAlignedBlock(len: usize, alignment: u29) error{OutOfMemory}!Block
-///       assert(len > 0);
-///       assert(len == alignForward(len)) // if alignForward is implemented
+///     * allocOverAlignedBlock(lenRef: *usize, alignment: u29) error{OutOfMemory}!Block
+///       assert(lenRef.* > 0);
 ///       assert(isValidAlign(alignment));
 ///       assert(alignment > Block.alignment);
-///       The "Over" part of "OverAligned" means `alignment` > `Block.alignment`.
-///       If this allocator implements alignForward, then len MUST already be aligned from
-///       the alignForward function.
-///       I think the only allocator that would implement this is the AlignAllocator and any wrapping allocator.
+///       The "Over" part of "OverAligned" means `alignment` > `Block.alignment`.  The returned block.ptr() will be
+///       aligned to the given `alignment`.
+///       lenRef should point to the length that the caller requires.  It can be any value > 0, it does not need
+///       to be aligned by `alignForward`. The allocator will return the full length available at the returned block.ptr()
+///       address through `lenRef`, which will be >= the value that was passed in.
+///       If the block is larger than requested, the caller can attempt to retract the block if they know they
+///       won't need the extra memory. Note that this is an option purposely left to the caller (see Single Responsibility
+///       Principle).
+///       NOTE: so far the only allocator that I know of that should implement this is the AlignAllocator and any wrapping allocators.
 ///
 /// ### Deallocation:
 ///
@@ -295,7 +299,7 @@ test "BumpDownAllocator" {
 ///     // if hasLen is true, a function to return the length of the memory owned by the block
 ///     // and a function to return the memory owned by the block as a slice
 ///     pub fn len(self: @This()) usize { ... }
-///     pub fn lenRef(self: *@This()) *usize { ... }
+///     pub fn setLen(self: *@This(), newLen: usize) void { ... }
 ///
 pub fn MakeBlockType(comptime Data: type) type {
     if (!isValidAlign(Data.alignment)) @compileError("invalid alignment");
@@ -319,13 +323,8 @@ pub fn MakeBlockType(comptime Data: type) type {
         pub fn ptr(self: Self) [*]align(alignment) u8 { return self.data.ptr(); }
 
         pub usingnamespace if (!hasLen) struct { } else struct {
-            // TODO: I'd like to use this instead
-            //pub fn len(self: Self) usize { return self.data.lenRef().*; }
             pub fn len(self: Self) usize { return self.data.len(); }
-
-            // TODO: should I support sliceRef? slice()?
-            //       I could use data.ptr()[0..data.len()] if sliceRef is not implemented
-            //pub fn slice(self: Self) []align(alignment) u8 { return self.data.sliceRef().*; }
+            pub fn setLen(self: *Self, newLen: usize) void { self.data.setLen(newLen); }
         };
     };
 }
@@ -370,11 +369,8 @@ pub fn MakeSimpleBlockType(
             pub fn ptrRef(self: *Self) *[*]align(alignment) u8 {
                 return *self.buf.ptr;
             }
-            // TODO: can I remove this?
             pub fn len(self: Self) usize { return self.buf.len; }
-            pub fn lenRef(self: *Self) *usize {
-                return &self.buf.len;
-            }
+            pub fn setLen(self: Self, newLen: usize) void { return self.buf.len = newLen; }
         };
     };
     return MakeBlockType(Data);
@@ -389,8 +385,8 @@ pub const FailAllocator = struct {
         assert(len > 0);
         return error.OutOfMemory;
     }
-    pub fn allocOverAlignedBlock(self: @This(), len: usize, alignment: u29) error{OutOfMemory}!Block {
-        assert(len > 0);
+    pub fn allocOverAlignedBlock(self: @This(), lenRef: *usize, alignment: u29) error{OutOfMemory}!Block {
+        assert(lenRef.* > 0);
         assert(isValidAlign(alignment));
         assert(alignment > Block.alignment);
         return error.OutOfMemory;
@@ -757,10 +753,10 @@ pub fn LogAllocator(comptime T: type) type {
         pub usingnamespace if (!implements(T, "allocOverAlignedBlock")) struct {
             pub const allocOverAlignedBlock = void;
         } else struct {
-            pub fn allocOverAlignedBlock(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}!Block {
-                std.debug.warn("{}: allocOverAlignedBlock len={} align={}\n", .{@typeName(T), len, allocAlign});
-                const result = try self.allocator.allocOverAlignedBlock(len, allocAlign);
-                std.debug.warn("{}: allocOverAlignedBlock returning {}\n", .{@typeName(T), result.ptr()});
+            pub fn allocOverAlignedBlock(self: SelfRef, lenRef: *usize, allocAlign: u29) error{OutOfMemory}!Block {
+                std.debug.warn("{}: allocOverAlignedBlock len={} align={}\n", .{@typeName(T), lenRef.*, allocAlign});
+                const result = try self.allocator.allocOverAlignedBlock(lenRef, allocAlign);
+                std.debug.warn("{}: allocOverAlignedBlock returning {}:{}\n", .{@typeName(T), result.ptr(), lenRef.*});
                 return result;
             }
         };
@@ -865,11 +861,8 @@ pub fn PreciseAllocator(comptime T: type) type {
             pub fn ptrRef(self: *BlockSelf) *[*]align(alignment) u8 {
                 return self.forwardBlock.data.ptrRef();
             }
-            // TODO: can I remove this?
             pub fn len(self: BlockSelf) usize { return self.preciseLen; }
-            pub fn lenRef(self: *BlockSelf) *usize {
-                return &self.preciseLen;
-            }
+            pub fn setLen(self: *BlockSelf, newLen: usize) void { self.preciseLen = newLen; }
         });
 
         allocator: T,
@@ -882,10 +875,11 @@ pub fn PreciseAllocator(comptime T: type) type {
         pub usingnamespace if (!implements(T, "allocOverAlignedBlock")) struct {
             pub const allocOverAlignedBlock = void;
         } else struct {
-            pub fn allocOverAlignedBlock(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}!Block {
+            pub fn allocOverAlignedBlock(self: SelfRef, lenRef: *usize, allocAlign: u29) error{OutOfMemory}!Block {
+                const forwardBlock = try self.allocator.allocOverAlignedBlock(lenRef, allocAlign);
                 return Block.init(.{
-                    .preciseLen = len,
-                    .forwardBlock = try self.allocator.allocOverAlignedBlock(T.alignForward(len), allocAlign)
+                    .preciseLen = lenRef.*,
+                    .forwardBlock = forwardBlock,
                 });
             }
         };
@@ -961,21 +955,50 @@ pub fn AlignAllocator(comptime T: type) type {
     return struct {
         const SelfRef = if (@sizeOf(T) == 0) @This() else *@This();
 
-        pub const Block = MakeSimpleBlockType(false, T.Block.alignment, T.Block);
+        const BlockData = struct {
+            const BlockSelf = @This();
+
+            pub const hasLen = T.Block.hasLen;
+            pub const alignment = T.Block.alignment;
+
+            buf: [*]align(T.Block.alignment) u8,
+            forwardBlock: T.Block,
+
+            pub usingnamespace if (T.Block.hasLen or !implements(T.Block, "initBuf")) struct {
+                pub const initBuf = void;
+            } else struct {
+                pub fn initBuf(slice: []align(alignment) u8) BlockSelf { return .{
+                    .preciseLen = slice.len,
+                    .forwardBlock = T.Block.initBuf(slice.ptr)
+                };}
+            };
+
+            // TODO: can I remove this?
+            pub fn ptr(self: BlockSelf) [*]align(alignment) u8 { return self.forwardBlock.ptr(); }
+            pub fn ptrRef(self: *BlockSelf) *[*]align(alignment) u8 {
+                return self.forwardBlock.data.ptrRef();
+            }
+            pub fn len(self: BlockSelf) usize { return self.forwardBlock.len() - getAlignOffsetData(self); }
+            pub fn setLen(self: *BlockSelf, newLen: usize) void {
+                self.forwardBlock.setLen(getAlignOffsetData(self.*) + newLen);
+            }
+        };
+        pub const Block = MakeBlockType(BlockData);
         allocator: T,
 
         /// returns the offset of the aligned block from the underlying allocated block
-        fn getAlignOffset(block: *Block) usize {
-            return @ptrToInt(block.ptr()) - @ptrToInt(block.data.extra.ptr());
+        fn getAlignOffsetData(blockData: BlockData) usize {
+            return @ptrToInt(blockData.buf) - @ptrToInt(blockData.forwardBlock.ptr());
         }
+        fn getAlignOffset(block: Block) usize { return getAlignOffsetData(block.data); }
 
         pub const alignForward = T.alignForward;
         pub fn allocBlock(self: SelfRef, len: usize) error{OutOfMemory}!Block {
             const forwardBlock = try self.allocator.allocBlock(len);
-            return Block.init(.{ .buf = forwardBlock.ptr(), .extra = forwardBlock });
+            return Block.init(.{ .buf = forwardBlock.ptr(), .forwardBlock = forwardBlock });
         }
-        pub fn allocOverAlignedBlock(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}!Block {
-            assert(len > 0);
+        pub fn allocOverAlignedBlock(self: SelfRef, lenRef: *usize, allocAlign: u29) error{OutOfMemory}!Block {
+            assert(lenRef.* > 0);
             assert(isValidAlign(allocAlign));
             assert(allocAlign > Block.alignment);
 
@@ -993,20 +1016,22 @@ pub fn AlignAllocator(comptime T: type) type {
             // We need to allocate len, plus, the maximum span we would need to drop to find an aligned address.
             // TODO: instead of (- Block.alignment), (- self.allocator.nextAlignment())
             const maxDropLen = allocAlign - Block.alignment;
-            const allocLen : usize = alignLenForward(T, len + maxDropLen);
+            const allocLen : usize = alignLenForward(T, lenRef.* + maxDropLen);
             const forwardBlock = try self.allocator.allocBlock(allocLen);
             if (T.Block.hasLen)
                 assert(allocLen == forwardBlock.len());
             const alignedPtr = @alignCast(Block.alignment,
                 @intToPtr([*]u8, mem.alignForward(@ptrToInt(forwardBlock.ptr()), allocAlign))
             );
-            return Block.init(.{ .buf = alignedPtr, .extra = forwardBlock });
+            const block = Block.init(.{ .buf = alignedPtr, .forwardBlock = forwardBlock });
+            lenRef.* = block.len();
+            return block;
         }
         pub usingnamespace if (!implements(T, "deallocBlock")) struct {
             pub const deallocBlock = void;
         } else struct {
             pub fn deallocBlock(self: SelfRef, block: Block) void {
-                return self.allocator.deallocBlock(block.data.extra);
+                return self.allocator.deallocBlock(block.data.forwardBlock);
             }
         };
         pub usingnamespace if (!implements(T, "deallocAll")) struct {
@@ -1027,16 +1052,16 @@ pub fn AlignAllocator(comptime T: type) type {
             pub const extendBlockInPlace = void;
         } else struct {
             pub fn extendBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
-                const newAlignedLen = getAlignOffset(block) + new_len;
+                const newAlignedLen = getAlignOffset(block.*) + new_len;
                 // because we may have over-allocated, there could be alot of room available
                 // and we MUST check this before calling extendBlockInPlace because the size we request
                 // must be larger than what is already allocated
                 var callExtend = if (comptime !T.Block.hasLen) true
-                    else newAlignedLen > block.data.extra.len();
+                    else newAlignedLen > block.data.forwardBlock.len();
                 if (callExtend) {
-                    try self.allocator.extendBlockInPlace(&block.data.extra, newAlignedLen);
+                    try self.allocator.extendBlockInPlace(&block.data.forwardBlock, newAlignedLen);
                     if (T.Block.hasLen) {
-                        assert(block.data.extra.len() == newAlignedLen);
+                        assert(block.data.forwardBlock.len() == newAlignedLen);
                     }
                 }
             }
@@ -1046,13 +1071,13 @@ pub fn AlignAllocator(comptime T: type) type {
         } else struct {
             pub fn retractBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
                 assert(new_len > 0);
-                const newAlignedLen = getAlignOffset(block) + new_len;
+                const newAlignedLen = getAlignOffset(block.*) + new_len;
                 const callRetract = if (comptime !T.Block.hasLen) true
-                    else newAlignedLen < block.data.extra.len();
+                    else newAlignedLen < block.data.forwardBlock.len();
                 if (callRetract) {
-                    try self.allocator.retractBlockInPlace(&block.data.extra, newAlignedLen);
+                    try self.allocator.retractBlockInPlace(&block.data.forwardBlock, newAlignedLen);
                     if (T.Block.hasLen) {
-                        assert(block.data.extra.len() == newAlignedLen);
+                        assert(block.data.forwardBlock.len() == newAlignedLen);
                     }
                 }
             }
@@ -1064,11 +1089,11 @@ pub fn AlignAllocator(comptime T: type) type {
             // Note that this maintains the alignment from the original allocOverAlignedBlock call
             pub fn overrideReallocBlock(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
                 assert(new_len > 0);
-                const maxDropLen = block.data.extra.alignment - Block.alignment;
+                const maxDropLen = block.data.forwardBlock.alignment - Block.alignment;
                 const allocLen = new_len + maxDropLen;
-                try self.allocator.overrideReallocBlock(&block.data.extra, allocLen);
+                try self.allocator.overrideReallocBlock(&block.data.forwardBlock, allocLen);
                 block.buf = @alignCast(Block.alignment,
-                    @intToPtr([*]u8, mem.alignForward(@ptrToInt(block.data.extra.ptr()), block.data.extra.alignment))
+                    @intToPtr([*]u8, mem.alignForward(@ptrToInt(block.data.forwardBlock.ptr()), block.data.forwardBlock.alignment))
                 );
             }
         };
@@ -1165,8 +1190,10 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 assert(isValidAlign(allocAlign));
                 assert(allocAlign > alignment);
                 const paddedLen = len + allocPadding;
-                const block = try self.allocator.allocOverAlignedBlock(paddedLen, allocAlign);
-                if (comptime T.Block.hasLen) assert(block.len() == paddedLen);
+                var blockLen = paddedLen;
+                const block = try self.allocator.allocOverAlignedBlock(&blockLen, allocAlign);
+                assert(blockLen >= paddedLen);
+                if (comptime T.Block.hasLen) assert(block.len() == blockLen);
                 assert(mem.isAligned(@ptrToInt(block.ptr()), allocAlign));
                 const slice = block.ptr()[0..len];
                 if (storeBlock)
@@ -1210,7 +1237,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                     memcpyBackward(@ptrCast([*]u8, newBlockPtr), @ptrCast([*]u8, blockPtr), @sizeOf(T.Block));
                     assert(newBlockPtr.ptr() == slice.ptr);
                     if (T.Block.hasLen)
-                        newBlockPtr.data.lenRef().* = new_len;
+                        newBlockPtr.data.setLen(new_len);
                 }
             }
         };
@@ -1238,7 +1265,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
 //                            assert(blockCopy.len() == paddedLen);
 //                    }
 //                    if (T.Block.hasLen)
-//                        blockCopy.data.lenRef().* = new_len;
+//                        blockCopy.data.setLen(new_len);
 //                    getStoredBlockRef(slice.ptr[0..new_len]).* = blockCopy;
 //                }
 //            }
@@ -1292,12 +1319,16 @@ pub fn alignLenForward(comptime T: type, len: usize) usize {
     return if (comptime implements(T, "alignForward")) T.alignForward(len) else len;
 }
 /// Takes care of calling allocBlock or allocOverAlignedBlock based on `alignment`.
-pub fn allocAlignedBlock(allocator: var, len: usize, alignment: u29) error{OutOfMemory}!@TypeOf(allocator.*).Block {
-    assert(len > 0);
+pub fn allocAlignedBlock(allocator: var, lenRef: *usize, alignment: u29) error{OutOfMemory}!@TypeOf(allocator.*).Block {
+    assert(lenRef.* > 0);
     assert(isValidAlign(alignment));
     const T = @TypeOf(allocator.*);
-    if (alignment <= T.Block.alignment) return allocator.allocBlock(len);
-    return allocator.allocOverAlignedBlock(len, alignment);
+    if (alignment <= T.Block.alignment) {
+        if (comptime implements(T, "alignForward"))
+            lenRef.* = T.alignForward(lenRef.*);
+       return allocator.allocBlock(lenRef.*);
+    }
+    return allocator.allocOverAlignedBlock(lenRef, alignment);
 }
 
 /// Call deallocBlock only if it is supported by the given allocator, otherwise, do nothing.
@@ -1342,9 +1373,10 @@ pub fn testBlockAllocator(allocator: var) void {
     if (comptime implements(T, "allocOverAlignedBlock")) {
         {var alignment: u29 = 1; while (alignment < 8192) : (alignment *= 2) {
             {var i: u8 = 1; while (i < 200) : (i += 17) {
-                const len = alignLenForward(T, i);
-                assert(len >= i);
-                const block = allocAlignedBlock(allocator, len, alignment) catch continue;
+                var len : usize = i;
+                const block = allocAlignedBlock(allocator, &len, alignment) catch continue;
+                if (T.Block.hasLen)
+                    assert(block.len() == len);
                 defer deallocBlockIfSupported(allocator, block);
                 testReadWrite(block.ptr()[0..len], i);
             }}
@@ -1438,7 +1470,7 @@ fn testSliceAllocator(allocator: var) void {
         {var i: u8 = 1; while (i < 200) : (i += 1) {
             var slice = allocator.alloc(i) catch continue;
             defer allocator.dealloc(slice);
-            const extendLen = i + 2;
+            const extendLen = i + 30;
             allocator.extendInPlace(slice, extendLen) catch continue;
             slice = slice.ptr[0..extendLen];
             testReadWrite(slice, extendLen);
