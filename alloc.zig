@@ -180,13 +180,15 @@
 ///     They can only be called on "precise" allocators.
 ///
 ///     * cReallocBlock(block: *Block, currentLen: usize, newLen: usize) error{OutOfMemory}!void
-///     * cReallocAlignedBlock(block: *Block, currentLen: usize, newLen: usize, currentAlign: u29) error{OutOfMemory}!void
+///     * cReallocAlignedBlock(block: *Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void
 ///       assert(currentLen == block.len()) // if block.hasLen is true
 ///       assert(newLen > 0);
 ///       assert(newLen == alignForward(newLen)); // if alignForward is implemented
 ///       assert(currentLen != newLen);
 ///       assert(isValidAlign(currentAlign));
 ///       assert(mem.isAligned(@ptrToInt(block.ptr())), currentAlign);
+///       assert(isValidAlign(minAlign));
+///       assert(minAlign <= currentAlign);
 ///       This function is equivalent to C's realloc.
 ///       This should only be implemented by CAllocator, AlignAllocator and forwarded by "wrapping allocators".
 ///       The `reallocAlignedBlock` function in this module will implement the `realloc` operation for
@@ -746,7 +748,7 @@ pub const WindowsGlobalHeapAllocator = struct {
 ///
 /// This function is only supported for "precise" allocators.
 ///
-pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, currentLen: usize, newLen: usize, currentAlign: u29) error{OutOfMemory}!void {
+pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
     const T = @TypeOf(allocator.*);
     //if (comptime implements(T, "alignForward"))
     //    @compileError("reallocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not precise.");
@@ -758,6 +760,8 @@ pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, c
     assert(currentLen != newLen);
     assert(isValidAlign(currentAlign));
     assert(mem.isAligned(@ptrToInt(block.ptr()), currentAlign));
+    assert(isValidAlign(minAlign));
+    assert(minAlign <= currentAlign);
 
     if (comptime implements(T, "cReallocAlignedBlock"))
         return try allocator.overrideReallocBlock(block, currentLen, newLen, currentAlign);
@@ -783,9 +787,9 @@ pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, c
     //       be better on the cache and cause less fragmentation
 
     // fallback to creating a new block and copying the data
-    const newBlock = if (currentAlign <= T.Block.alignment)
-        try allocator.allocBlock(newLen) else try allocator.allocPreciseOverAlignedBlock(newLen, currentAlign);
-    assert(mem.isAligned(@ptrToInt(newBlock.ptr()), currentAlign));
+    const newBlock = if (minAlign <= T.Block.alignment)
+        try allocator.allocBlock(newLen) else try allocator.allocPreciseOverAlignedBlock(newLen, minAlign);
+    assert(mem.isAligned(@ptrToInt(newBlock.ptr()), minAlign));
     @memcpy(newBlock.ptr(), block.ptr(), block.len());
     deallocBlockIfSupported(allocator, block.*);
     block.* = newBlock;
@@ -1416,7 +1420,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
             pub const realloc = void;
         } else struct {
             /// Equivalent to C's realloc
-            pub fn realloc(self: SelfRef, slice: []align(alignment) u8, newLen: usize, currentAlign: u29) error{OutOfMemory}![]align(alignment) u8 {
+            pub fn realloc(self: SelfRef, slice: []align(alignment) u8, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}![]align(alignment) u8 {
                 assert(newLen > 0);
                 // make a copy of the block so we don't lose it during the shrink
                 var blockCopy = getBlockRef(slice).blockPtr().*;
@@ -1425,7 +1429,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 if (T.Block.hasLen)
                     assert(blockLen == blockCopy.len());
                 const newPaddedLen = newLen + allocPadding;
-                try reallocAlignedBlock(&self.allocator, &blockCopy, blockLen, newPaddedLen, currentAlign);
+                try reallocAlignedBlock(&self.allocator, &blockCopy, blockLen, newPaddedLen, currentAlign, minAlign);
                 if (T.Block.hasLen)
                     assert(blockCopy.len() == newPaddedLen);
                 const newSlice = blockCopy.ptr()[0..newLen];
@@ -1603,7 +1607,7 @@ pub fn testBlockAllocator(allocator: var) void {
                 testReadWrite(block.ptr()[0..len], i);
                 {
                     const nextLen = len + 10;
-                    if (reallocAlignedBlock(allocator, &block, len, nextLen, alignment)) |_| {
+                    if (reallocAlignedBlock(allocator, &block, len, nextLen, alignment, alignment)) |_| {
                         if (T.Block.hasLen) assert(block.len() == nextLen);
                         assert(mem.isAligned(@ptrToInt(block.ptr()), alignment));
                         testReadWrite(block.ptr()[0..nextLen], 201);
@@ -1612,7 +1616,7 @@ pub fn testBlockAllocator(allocator: var) void {
                 }
                 while (len > 30) {
                     const nextLen = len / 3;
-                    if (reallocAlignedBlock(allocator, &block, len, nextLen, alignment)) |_| {
+                    if (reallocAlignedBlock(allocator, &block, len, nextLen, alignment, alignment)) |_| {
                         if (T.Block.hasLen) assert(block.len() == nextLen);
                         assert(mem.isAligned(@ptrToInt(block.ptr()), alignment));
                         testReadWrite(block.ptr()[0..nextLen], 201);
@@ -1673,11 +1677,11 @@ fn testSliceAllocator(allocator: var) void {
                 defer allocator.dealloc(slice);
                 testReadWrite(slice, i);
                 {var j: u8 = 1; while (j <= 27) : (j += 13) {
-                    slice = allocator.realloc(slice, slice.len + j, alignment) catch break;
+                    slice = allocator.realloc(slice, slice.len + j, alignment, alignment) catch break;
                     testReadWrite(slice, j);
                 }}
                 {var j: u8 = 1; while (j <= 40 and j > slice.len) : (j += 13) {
-                    slice = allocator.realloc(slice, slice.len + j, alignment) catch break;
+                    slice = allocator.realloc(slice, slice.len + j, alignment, alignment) catch break;
                     testReadWrite(slice, j);
                 }}
             }}
