@@ -887,13 +887,13 @@ pub fn LogAllocator(comptime T: type) type {
         pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
             pub const shrinkBlockInPlace = void;
         } else struct {
-            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
+            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) void {
                 if (comptime Block.hasLen) {
                     std.debug.warn("{}: shrinkBlockInPlace {}:{} new_len={}\n", .{@typeName(T), block.ptr(), block.len(), new_len});
                 } else {
-                    std.debug.warn("{}: shrinkBlockInPlace {}\n", .{@typeName(T), block.ptr()});
+                    std.debug.warn("{}: shrinkBlockInPlace {} new_len={}\n", .{@typeName(T), block.ptr(), new_len});
                 }
-                return try self.allocator.shrinkBlockInPlace(block, new_len);
+                self.allocator.shrinkBlockInPlace(block, new_len);
             }
         };
 
@@ -1036,11 +1036,10 @@ pub fn PreciseAllocator(comptime T: type) type {
                 block.data.preciseLen = new_len;
             }
         };
-        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
-            pub const shrinkBlockInPlace = void;
-        } else struct {
-            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
-                const alignedLen = T.alignForward(new_len);
+
+        pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) void {
+            const alignedLen = T.alignForward(new_len);
+            if (comptime implements(T, "shrinkBlockInPlace")) {
                 const callShrink = if (comptime !T.Block.hasLen) true
                     else alignedLen > block.data.forwardBlock.len();
                 if (callShrink) {
@@ -1048,9 +1047,11 @@ pub fn PreciseAllocator(comptime T: type) type {
                     if (T.Block.hasLen)
                         assert(block.data.forwardBlock.len() == alignedLen);
                 }
-                block.data.preciseLen = new_len;
+            } else if (comptime implements(T, "retractBlockInPlace")) {
+                self.retractBlockInPlace(block, new_len) catch |e| { }; // ignore error
             }
-        };
+            block.data.preciseLen = new_len;
+        }
 
         pub usingnamespace if (!implements(T, "cReallocBlock")) struct {
             pub const cReallocBlock = void;
@@ -1392,33 +1393,22 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
             }
         };
 
-        // TODO: maybe also check if the BlockAllocator implements shrinkBlockInPlace
-        pub usingnamespace if (!storeBlock) struct {
+        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
             pub const shrinkInPlace = void;
         } else struct {
-            pub fn shrinkInPlace(self: SelfRef, slice: []align(alignment) u8, new_len: usize) void {
-                assert(new_len > 0);
-                assert(new_len < slice.len);
-                if (comptime !storeBlock) {
-                    // TODO: support the case where self.allocator implements shrinkBlockInPlace
-                    @compileError("shrinkInPlace not implemented for SliceAllocator that doesn't store the Block: " ++ @typeName(T));
-                } else {
-                    // make a copy of the block so we don't lose it during the shrink
-                    var blockCopy = getStoredBlockRef(slice).*;
-                    assert(slice.ptr == blockCopy.ptr());
-                    if (T.Block.hasLen)
-                        assert(slice.len == blockCopy.len());
-                    if (comptime false) {//implements(T, "shrinkBlockInPlace")) {
-                        const paddedLen = new_len + allocPadding;
-                        try self.allocator.shrinkBlockInPlace(&blockCopy, paddedLen);
-                        // whether or not the shrink works, we cannot fail and need to track the new length
-                        if (T.Block.hasLen)
-                            assert(blockCopy.len() == paddedLen);
-                    }
-                    if (T.Block.hasLen)
-                        blockCopy.data.setLen(new_len);
-                    getStoredBlockRef(slice.ptr[0..new_len]).* = blockCopy;
-                }
+            pub fn shrinkInPlace(self: SelfRef, slice: []align(alignment) u8, newLen: usize) void {
+                assert(newLen > 0);
+                assert(newLen < slice.len);
+                // make a copy of the block so we don't lose it during the shrink
+                var blockCopy = getStoredBlockRef(slice).*;
+                assert(slice.ptr == blockCopy.ptr());
+                if (T.Block.hasLen)
+                    assert(slice.len + allocPadding == blockCopy.len());
+                const newPaddedLen = newLen + allocPadding;
+                self.allocator.shrinkBlockInPlace(&blockCopy, newPaddedLen);
+                if (T.Block.hasLen)
+                    assert(blockCopy.len() == newPaddedLen);
+                getStoredBlockRef(slice.ptr[0..newLen]).* = blockCopy;
             }
         };
 
@@ -1667,16 +1657,20 @@ fn testSliceAllocator(allocator: var) void {
             testReadWrite(slice, extendLen);
         }}
     }
-//    if (comptime implements(T, "shrinkInPlace")) {
-//        {var i: u8 = 2; while (i < 200) : (i += 14) {
-//            var slice = allocator.alloc(i) catch continue;
-//            defer allocator.dealloc(slice);
-//            testReadWrite(slice, i);
-//            allocator.shrinkInPlace(slice, i - 1);
-//            slice = slice[0..i-1];
-//            testReadWrite(slice, i);
-//        }}
-//    }
+    if (comptime implements(T, "shrinkInPlace")) {
+        {var i: u8 = 2; while (i < 200) : (i += 14) {
+            var slice = allocator.alloc(i) catch continue;
+            assert(slice.len == i);
+            defer allocator.dealloc(slice);
+            testReadWrite(slice, i);
+            while (slice.len >= 2) {
+                const nextLen = slice.len / 2;
+                allocator.shrinkInPlace(slice, nextLen);
+                slice = slice[0..nextLen];
+                testReadWrite(slice, i);
+            }
+        }}
+    }
 //    if (comptime implements(T, "realloc")) {
 //        {var i: u8 = 2; while (i < 200) : (i += 14) {
 //            var slice = allocator.alloc(i) catch continue;
