@@ -242,9 +242,18 @@ pub const Alloc = struct {
 };
 pub fn MakeBlockAllocator(comptime T: type) type {return struct {
     init: T,
+
+    ///
+    /// `precise` wraps another allocator.  It adds an extra length field to each block. This extra field enables
+    /// allocations of any size (aka "precise allocations") and also enables the "shrinkBockInPlace" operation.
+    ///
+    /// `precise` should never be wrapped by `aligned`, rather, it should always be the one wrapping `aligned`
+    /// (see "Why does PreciseAllocator wrap AlignAllocator instead of the other way around?").
+    ///
     pub fn precise(self: @This()) MakeBlockAllocator(PreciseAllocator(T)) {
         return .{ .init = makePreciseAllocator(self.init) };
     }
+
     pub fn aligned(self: @This()) MakeBlockAllocator(AlignAllocator(T)) {
         return .{ .init = makeAlignAllocator(self.init) };
     }
@@ -278,8 +287,10 @@ test "WindowsHeapAllocator" {
     if (std.Target.current.os.tag != .windows) return;
     testBlockAllocator(&Alloc.windowsGlobalHeap.init);
     testBlockAllocator(&Alloc.windowsGlobalHeap.aligned().init);
+    testBlockAllocator(&Alloc.windowsGlobalHeap.aligned().precise().init);
     testSliceAllocator(&Alloc.windowsGlobalHeap.slice().init);
     testSliceAllocator(&Alloc.windowsGlobalHeap.aligned().slice().init);
+    testSliceAllocator(&Alloc.windowsGlobalHeap.aligned().precise().slice().init);
     // TODO: test private heaps with HeapAlloc
     //{
     //    var a = Alloc.windowsHeap(HeapAlloc(...)).init;
@@ -929,8 +940,10 @@ pub fn makePreciseAllocator(allocator: var) PreciseAllocator(@TypeOf(allocator))
     return PreciseAllocator(@TypeOf(allocator)) { .allocator = allocator };
 }
 pub fn PreciseAllocator(comptime T: type) type {
-    if (!implements(T, "alignForward"))
-        @compileError("cannot wrap '" ++ @typeName(T) ++ "' with PreciseAllocator because it is already precise (it does not have an `alignForward` function)");
+    if (T.isPreciseWrapped)
+        @compileError(@typeName(T) ++ " is already wrapped with PreciseAllocator");
+    if (implements(T, "shrinkBlockInPlace"))
+        @compileError(@typeName(T) ++ " already supports shrinkInPlace, wrapping it with .precise() won't help");
 
     return struct {
         const SelfRef = if (@sizeOf(T) == 0) @This() else *@This();
@@ -965,7 +978,10 @@ pub fn PreciseAllocator(comptime T: type) type {
 
         pub const alignForward = void;
         pub fn allocBlock(self: SelfRef, len: usize) error{OutOfMemory}!Block {
-            return Block.init(.{ .preciseLen = len, .forwardBlock = try self.allocator.allocBlock(T.alignForward(len)) });
+            return Block.init(.{
+                .preciseLen = len,
+                .forwardBlock = try self.allocator.allocBlock(alignLenForward(T, len))
+            });
         }
 
         pub usingnamespace if (!implements(T, "allocOverAlignedBlock")) struct {
@@ -1014,7 +1030,7 @@ pub fn PreciseAllocator(comptime T: type) type {
             pub const extendBlockInPlace = void;
         } else struct {
             pub fn extendBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
-                const alignedLen = T.alignForward(new_len);
+                const alignedLen = alignLenForward(T, new_len);
                 const callExtend = if (comptime !T.Block.hasLen) true
                     else alignedLen > block.data.forwardBlock.len();
                 if (callExtend) {
@@ -1029,7 +1045,7 @@ pub fn PreciseAllocator(comptime T: type) type {
             pub const retractBlockInPlace = void;
         } else struct {
             pub fn retractBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
-                const alignedLen = T.alignForward(new_len);
+                const alignedLen = alignLenForward(T, new_len);
                 const callRetract = if (comptime !T.Block.hasLen) true
                     else alignedLen > block.data.forwardBlock.len();
                 if (callRetract) {
@@ -1042,7 +1058,7 @@ pub fn PreciseAllocator(comptime T: type) type {
         };
 
         pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) void {
-            const alignedLen = T.alignForward(new_len);
+            const alignedLen = alignLenForward(T, new_len);
             if (comptime implements(T, "shrinkBlockInPlace")) {
                 const callShrink = if (comptime !T.Block.hasLen) true
                     else alignedLen > block.data.forwardBlock.len();
@@ -1399,7 +1415,8 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 assert(newLen > 0);
                 assert(newLen < slice.len);
                 // make a copy of the block so we don't lose it during the shrink
-                var blockCopy = getStoredBlockRef(slice).*;
+                var blockRef = getBlockRef(slice);
+                var blockCopy = blockRef.blockPtr().*;
                 if (storeBlock) {
                     assert(slice.ptr == blockCopy.ptr());
                     if (T.Block.hasLen) assert(slice.len + allocPadding == blockCopy.len());
