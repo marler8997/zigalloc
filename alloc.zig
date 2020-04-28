@@ -21,6 +21,12 @@
 ///     const s = a.alloc(40);
 ///     defer a.dealloc(s);
 ///
+///     // Create a custom allocator and custom wrapper
+///     const MyAllocator = struct { ... };
+///     const MyAllocatorWrapper = struct { ... };
+///     const a = Alloc.custom(MyAllocator { ... }).aligned()
+///         .custom(MyAllocatorWrapper { ... }).precise().slice();
+///
 /// This library allows every allocator to declare their individual-allocation storage
 /// requirements through a custom "Block" type. The Block type can store any data the allocator
 /// wants to associate with individual allocations. It could be just a pointer, or
@@ -228,6 +234,11 @@ pub const Alloc = struct {
     pub fn bumpDown(comptime alignment: u29, buf: []u8) MakeBlockAllocator(BumpDownAllocator(alignment)) {
         return .{ .init = makeBumpDownAllocator(alignment, buf) };
     }
+
+    // Support method call syntax to add custom allocators.
+    pub fn custom(allocator: var) MakeBlockAllocator(@TypeOf(allocator)) {
+        return .{ .init = allocator };
+    }
 };
 pub fn MakeBlockAllocator(comptime T: type) type {return struct {
     init: T,
@@ -253,6 +264,13 @@ pub fn MakeBlockAllocator(comptime T: type) type {return struct {
     pub fn slice(self: @This()) MakeSliceAllocator(SliceAllocator(T)) {
         return .{ .init = makeSliceAllocator(self.init) };
     }
+
+    // TODO: can't get this to work yet
+    // Support method call syntax to add custom allocators.
+    //pub fn custom(self: @This(), wrapperTypeFunc: var) MakeBlockAllocator(@typeInfo(@TypeOf(wrapperTypeFunc)).Fn.return_type.?) {
+    //    @compileLog(@TypeOf(wrapperTypeFunc));
+    //    return .{ .init = @call(.{}, @typeInfo(@TypeOf(wrapperTypeFunc)).Fn.return_type.?, .{self} ) };
+    //}
 };}
 pub fn MakeSliceAllocator(comptime T: type) type {return struct {
     init: T,
@@ -264,6 +282,11 @@ test "FailAllocator" {
     testBlockAllocator(&Alloc.fail.log().init);
     testSliceAllocator(&Alloc.fail.slice().init);
     testSliceAllocator(&Alloc.fail.log().slice().init);
+
+    // test that '.custom' syntax works
+    _ = &Alloc.custom(FailAllocator{ }).init;
+    // TODO: can't get custom allocator wrappers to work yet
+    //_ = &Alloc.fail.custom(LogAllocator).init;
 }
 test "CAllocator" {
     if (!std.builtin.link_libc) return;
@@ -412,6 +435,7 @@ pub fn MakeSimpleBlockType(
 /// An allocator that always fails.
 pub const FailAllocator = struct {
     pub const Block = MakeSimpleBlockType(true, 1, struct {});
+    pub fn init(_: struct{}) FailAllocator { return .{}; }
 
     pub const alignForward = void;
     pub fn allocBlock(self: @This(), len: usize) error{OutOfMemory}!Block {
