@@ -408,7 +408,7 @@ pub fn MakeSimpleBlockType(
         pub usingnamespace if (@sizeOf(Extra) > 0) struct {
             pub const initBuf = void;
         } else struct {
-            pub fn initBuf(slice: Buf) Self { return .{ .buf = slice, .extra = .{} }; }
+            pub fn initBuf(buf: Buf) Self { return .{ .buf = buf, .extra = .{} }; }
         };
 
         pub usingnamespace if (!hasLen) struct {
@@ -1086,17 +1086,8 @@ pub fn AlignAllocator(comptime T: type) type {
 
             buf: [*]align(T.Block.alignment) u8,
             forwardBlock: T.Block,
-
-            pub usingnamespace if (!implements(T.Block, "initBuf")) struct {
-                pub const initBuf = void;
-            } else struct {
-                const Buf = if (T.Block.hasLen) []align(alignment) u8 else [*]align(alignment) u8;
-                pub fn initBuf(buf: Buf) BlockSelf { return .{
-                    .buf = if (T.Block.hasLen) buf.ptr else buf,
-                    .forwardBlock = T.Block.initBuf(buf)
-                };}
-            };
-
+            // AlignAllocaor can never be represented with just a single pointer/slice
+            pub const initBuf = void;
             pub fn ptr(self: BlockSelf) [*]align(alignment) u8 { return self.buf; }
             pub fn len(self: BlockSelf) usize { return self.forwardBlock.len() - getAlignOffsetData(self); }
             pub fn setLen(self: *BlockSelf, newLen: usize) void {
