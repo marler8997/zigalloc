@@ -459,14 +459,14 @@ pub const CAllocator = struct {
     pub const deinitAndDeallocAll = void;
     pub const extendBlockInPlace = void;
     pub const retractBlockInPlace = void;
-
-    pub fn cRealloc(self: @This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
+    pub const shrinkBlockInPlace = void;
+    pub fn cReallocBlock(self: @This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
         assert(newLen > 0);
-        const ptr = std.c.realloc(block.ptr(), new_len)
+        const ptr = std.c.realloc(block.ptr(), newLen)
             orelse return error.OutOfMemory;
         block.* = Block.initBuf(@ptrCast([*]u8, ptr));
     }
-    pub const cAlignedRealloc = void;
+    pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
 };
 
@@ -1092,16 +1092,16 @@ pub fn AlignAllocator(comptime T: type) type {
             buf: [*]align(T.Block.alignment) u8,
             forwardBlock: T.Block,
 
-            pub usingnamespace if (T.Block.hasLen or !implements(T.Block, "initBuf")) struct {
+            pub usingnamespace if (!implements(T.Block, "initBuf")) struct {
                 pub const initBuf = void;
             } else struct {
-                pub fn initBuf(slice: []align(alignment) u8) BlockSelf { return .{
-                    .preciseLen = slice.len,
-                    .forwardBlock = T.Block.initBuf(slice.ptr)
+                const Buf = if (T.Block.hasLen) []align(alignment) u8 else [*]align(alignment) u8;
+                pub fn initBuf(buf: Buf) BlockSelf { return .{
+                    .buf = if (T.Block.hasLen) buf.ptr else buf,
+                    .forwardBlock = T.Block.initBuf(buf)
                 };}
             };
 
-            // TODO: can I remove this?
             pub fn ptr(self: BlockSelf) [*]align(alignment) u8 { return self.buf; }
             pub fn ptrRef(self: *BlockSelf) *[*]align(alignment) u8 {
                 return &self.buf;
@@ -1152,7 +1152,7 @@ pub fn AlignAllocator(comptime T: type) type {
                 @intToPtr([*]u8, mem.alignForward(@ptrToInt(forwardBlock.ptr()), allocAlign))
             );
             const block = Block.init(.{ .buf = alignedPtr, .forwardBlock = forwardBlock });
-            lenRef.* = block.len();
+            lenRef.* = allocLen - getAlignOffset(block);
             return block;
         }
         pub const allocPreciseOverAlignedBlock = void;
