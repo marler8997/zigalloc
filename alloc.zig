@@ -1337,7 +1337,7 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 getBlockRef(slice).blockPtr().* = block;
             return slice;
         }
-        pub usingnamespace if (!implements(T, "allocOverAlignedBlock")) struct {
+        pub usingnamespace if (!implements(T, "allocPreciseOverAlignedBlock")) struct {
             pub const allocOverAligned = void;
         } else struct {
             pub fn allocOverAligned(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}![]align(alignment) u8 {
@@ -1345,10 +1345,8 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 assert(isValidAlign(allocAlign));
                 assert(allocAlign > alignment);
                 const paddedLen = len + allocPadding;
-                var blockLen = paddedLen;
-                const block = try self.allocator.allocOverAlignedBlock(&blockLen, allocAlign);
-                assert(blockLen >= paddedLen);
-                if (comptime T.Block.hasLen) assert(block.len() == blockLen);
+                const block = try self.allocator.allocPreciseOverAlignedBlock(paddedLen, allocAlign);
+                if (comptime T.Block.hasLen) assert(block.len() == paddedLen);
                 assert(mem.isAligned(@ptrToInt(block.ptr()), allocAlign));
                 const slice = block.ptr()[0..len];
                 if (storeBlock)
