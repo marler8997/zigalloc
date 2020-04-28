@@ -137,29 +137,13 @@
 ///       assert(newLen > 0);
 ///       assert(newLen < block.len());
 ///       Shrink a block without moving it.
-///       Unlink restrictBlockInPlace, this method cannot fail.
-///       After calling this, block.len() will be set to `newLen`.
-///       The allocator may or may not be able to use the released space.
+///       Unlink restrictBlockInPlace, this method cannot fail. After calling this, block.len() will
+///       be set to `newLen`. The allocator may or may not be able to use the released space.
 ///       Most allocators will not implement this as it typically requires extra space to store
 ///       any discrepancy between the caller length and the underlying allocator's length.  Wrap any
-///       allocator with PreciseAllocator to support this.
+///       allocator with ".precise()" to support this.
 ///
 ///     * TODO: might want to add a method to extend both left and right? expand?
-///
-/// ### Shrink Block
-///
-///     * shrinkBlockInPlace(block: *Block, new_len: usize) void
-///       assert(new_len > 0); // otherwise, deallocBlock should be called
-///       assert(new_len < block.slice.len);
-///       Shrink the length of the block.  After this is called, if Block.hasLen is true, then
-///       block().len must equal new_len.  This function differs from "retractBlockInPlace" in
-///       that it cannot fail. The allocator may or may not be able to use the reclaimed memory,
-///       however, once this function is called, the caller does not need to remember the previous
-///       length, it is up to the allocator to retain that if it requires it.
-///
-///       Most allocators likely won't support this directly because it will require extra memory to track
-///       any discrepancy between the prevous length and the new shrunken length, in which case
-///       you can add support by wrapping any allocator with ShrinkAllocator.
 ///
 /// ### Ownership? (How helpful is this?)
 ///
@@ -194,19 +178,24 @@
 ///       The `reallocAlignedBlock` function in this module will implement the `realloc` operation for
 ///       every allocator using a combination of other operations.  The C allocator is special because
 ///       it does not support enough operations to support realloc, so we call its realloc function directly.
-///       The currentAlign value should be the alignment requested when the block was allocated.
+///       The currentAlign value should be the alignment requested when the block was allocated. `minAlign`
+///       must be <= to currentAlign, and indicates what alignment must be maintained if the memory is moved.
 ///
 ///
 /// ### Why does PreciseAllocator wrap AlignAllocator instead of the other way around?
 /// --------------------------------------------------------------------------------
-/// It's to support "precise" and "over-aligned" allocations.  The AlignAllocator needs to be able to
-/// change the length of the allocation in order to get an aligned address.  Once the allocator becomes
+/// It's to support allocations that are both "precise" and "over-aligned".  The AlignAllocator needs to
+/// be able to change the length of the allocation to get an aligned address.  Once the allocator becomes
 /// precise, we've lost the ability to change the length unless we add extra storage to the Block. By
 /// always keeping the AlignAllocator underneath the PreciseAllocator, it's free to change the length
 /// of the allocation without having to store the discrepancy.
 ///
-///    for now I enforce this with the isPreciseWrapped bool.  An align allocator can wrap a precise
-///    allocator, but cannot wrap a PreciseAllocator specifically.
+/// For now I enforce this ordering with the isPreciseWrapped bool. Note that ".align()" can wrapp allocators
+/// that can perform "precise allocations" (i.e. .bumpDown(1)), however, it cannot specifically wrap ".precise()".
+///
+/// ================================================================================
+/// TODO: Should I remove all the asserts inside the function bodies and create an AssertAllocator?
+/// ================================================================================
 ///
 const std = @import("std");
 const mem = std.mem;
@@ -728,26 +717,6 @@ pub const WindowsGlobalHeapAllocator = struct {
 // TODO: make SlabAllocator?
 // TODO: make a SanityAllocator that saves all the blocks and ensures every call passes in valid blocks.
 // TODO: make a LockingAllocator/ThreadSafeAllocator that can wrap any other allocator?
-
-///// Takes care of calling either extendBlockInPlace or retractBlockInPlace
-//pub fn resizeBlockInPlace(allocator: var, block: *@TypeOf(allocator.*).Block, new_len: usize) error{OutOfMemory}!void {
-//    assert(new_len > 0);
-//
-//    const T = @TypeOf(allocator.*);
-//    if (comptime T.Block.hasLen) {
-//        if (implements(T, "resizeBlockNoLenInPlace"))
-//            @compileError(@typeName(T) ++ " MUST NOT implement resizeBlockNoLenInPlace because Block.hasLen is true");
-//        if (new_len > block.len())
-//            return allocator.extendBlockInPlace(block, new_len);
-//        if (new_len < block.len())
-//            return allocator.retractBlockInPlace(block, new_len);
-//        std.debug.panic("resizeBlockInPlace new_len == block.len() ({})", .{new_len});
-//    } else {
-//        if (!implements(T, "resizeBlockNoLenInPlace"))
-//            return error.OutOfMemory;
-//        return allocator.resizeBlockNoLenInPlace(block, new_len);
-//    }
-//}
 
 /// Equivalent to C's realloc. All allocators will share a common implementation of this except
 /// for the C allocator which has its own implementation.
