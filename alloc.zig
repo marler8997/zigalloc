@@ -133,13 +133,16 @@
 ///       Note that block is passed in by reference because the function can modify it.  If it is
 ///       modified, the caller must pass in the new version for all future calls.
 ///
-///     * Right now this isn't needed, but I'm keeping the doc around it around in case I do need it later
-///       resizeBlockNoLenInPlace(block: *Block, new_len: usize) error{OutOfMemory}!void
-///       assert(!Block.hasLen);
-///       assert(new_len > 0);
-///       A allocator may only implement this if Block.hasLen is false.  Otherwise, the caller
-///       MUST call either extendBlockInPlace or retractBlockInPlace. This will do the equivalent
-///       of either extendBlockInPlace or retractBlockInPlace.
+///     * shrinkBlockInPlace(block: *Block, newLen: usize) void
+///       assert(newLen > 0);
+///       assert(newLen < block.len());
+///       Shrink a block without moving it.
+///       Unlink restrictBlockInPlace, this method cannot fail.
+///       After calling this, block.len() will be set to `newLen`.
+///       The allocator may or may not be able to use the released space.
+///       Most allocators will not implement this as it typically requires extra space to store
+///       any discrepancy between the caller length and the underlying allocator's length.  Wrap any
+///       allocator with PreciseAllocator to support this.
 ///
 ///     * TODO: might want to add a method to extend both left and right? expand?
 ///
@@ -430,6 +433,7 @@ pub const FailAllocator = struct {
     pub const deinitAndDeallocAll = void;
     pub const extendBlockInPlace = void;
     pub const retractBlockInPlace = void;
+    pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
     pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
@@ -525,6 +529,7 @@ pub const MmapAllocator = struct {
         assert(new_len == alignForward(new_len));
         return mremapInPlace(block, new_len);
     }
+    pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
     pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
@@ -603,6 +608,7 @@ pub fn BumpDownAllocator(comptime alignment : u29) type {return struct {
     /// BumpDown cannot extend/retract blocks, but BumpUp could extend/retract the last one
     pub const extendBlockInPlace = void;
     pub const retractBlockInPlace = void;
+    pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
     pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
@@ -660,6 +666,7 @@ pub const WindowsHeapAllocator = struct {
         // TODO: use HEAP_NO_SERIALIZE flag if we are single-threaded?
         return self.heapReAlloc(block, new_len, 0);
     }
+    pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
     pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
@@ -699,6 +706,7 @@ pub const WindowsGlobalHeapAllocator = struct {
     pub fn retractBlockInPlace(self: @This(), block: *Block, new_len: usize) error{OutOfMemory}!void {
         return try getInstance().retractBlockInPlace(block, new_len);
     }
+    pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
     pub const cReallocAlignedBlock = void;
     pub const isPreciseWrapped = false;
@@ -876,6 +884,18 @@ pub fn LogAllocator(comptime T: type) type {
                 return try self.allocator.retractBlockInPlace(block, new_len);
             }
         };
+        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
+            pub const shrinkBlockInPlace = void;
+        } else struct {
+            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
+                if (comptime Block.hasLen) {
+                    std.debug.warn("{}: shrinkBlockInPlace {}:{} new_len={}\n", .{@typeName(T), block.ptr(), block.len(), new_len});
+                } else {
+                    std.debug.warn("{}: shrinkBlockInPlace {}\n", .{@typeName(T), block.ptr()});
+                }
+                return try self.allocator.shrinkBlockInPlace(block, new_len);
+            }
+        };
 
         pub usingnamespace if (!implements(T, "cReallocBlock")) struct {
             pub const cReallocBlock = void;
@@ -1010,6 +1030,21 @@ pub fn PreciseAllocator(comptime T: type) type {
                     else alignedLen > block.data.forwardBlock.len();
                 if (callRetract) {
                     try self.allocator.retractBlockInPlace(&block.data.forwardBlock, alignedLen);
+                    if (T.Block.hasLen)
+                        assert(block.data.forwardBlock.len() == alignedLen);
+                }
+                block.data.preciseLen = new_len;
+            }
+        };
+        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
+            pub const shrinkBlockInPlace = void;
+        } else struct {
+            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, new_len: usize) error{OutOfMemory}!void {
+                const alignedLen = T.alignForward(new_len);
+                const callShrink = if (comptime !T.Block.hasLen) true
+                    else alignedLen > block.data.forwardBlock.len();
+                if (callShrink) {
+                    self.allocator.shrinkBlockInPlace(&block.data.forwardBlock, alignedLen);
                     if (T.Block.hasLen)
                         assert(block.data.forwardBlock.len() == alignedLen);
                 }
@@ -1166,6 +1201,23 @@ pub fn AlignAllocator(comptime T: type) type {
                     else newAlignedLen < block.data.forwardBlock.len();
                 if (callRetract) {
                     try self.allocator.retractBlockInPlace(&block.data.forwardBlock, newAlignedLen);
+                    if (T.Block.hasLen) {
+                        assert(block.data.forwardBlock.len() == newAlignedLen);
+                    }
+                }
+            }
+        };
+        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
+            pub const shrinkBlockInPlace = void;
+        } else struct {
+            pub fn shrinkBlockInPlace(self: SelfRef, block: *Block, newLen: usize) void {
+                assert(newLen > 0);
+                if (T.Block.hasLen) assert(newLen < block.len());
+                const newAlignedLen = getAlignOffset(block.*) + newLen;
+                const callShrink = if (comptime !T.Block.hasLen) true
+                    else newAlignedLen < block.data.forwardBlock.len();
+                if (callShrink) {
+                    try self.allocator.shrinkBlockInPlace(&block.data.forwardBlock, newAlignedLen);
                     if (T.Block.hasLen) {
                         assert(block.data.forwardBlock.len() == newAlignedLen);
                     }
@@ -1538,17 +1590,21 @@ pub fn testBlockAllocator(allocator: var) void {
             }
         }}
     }
-
-//    if (comptime implements(T, "shrinkBlockInPlace")) {
-//        blk: {
-//            var block = allocator.allocPreciseBlock(2) catch break :blk;
-//            defer deallocBlockIfSupported(allocator, block);
-//            testReadWrite(block.ptr()[0..2], 121);
-//
-//            allocator.shrinkBlockInPlace(&block, 1);
-//            testReadWrite(block.ptr()[0..1], 33);
-//        }
-//    }
+    if (comptime implements(T, "shrinkBlockInPlace")) {
+        const shrinkLen = alignLenForward(T, 1);
+        assert(shrinkLen >= 1);
+        {var i: u8 = 2; while (i < 100) : (i += 1) {
+            const len = alignLenForward(T, i);
+            assert(len >= i);
+            if (shrinkLen < len) {
+                var block = allocator.allocBlock(len) catch continue;
+                defer deallocBlockIfSupported(allocator, block);
+                testReadWrite(block.ptr()[0..len], 18);
+                allocator.shrinkBlockInPlace(&block, shrinkLen);
+                testReadWrite(block.ptr()[0..shrinkLen], 91);
+            }
+        }}
+    }
 
     // test reallocBlock
     if (comptime implements(T, "allocPreciseOverAlignedBlock")) {
