@@ -794,7 +794,7 @@ pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, c
     const newBlock = if (minAlign <= T.Block.alignment)
         try allocator.allocBlock(newLen) else try allocator.allocPreciseOverAlignedBlock(newLen, minAlign);
     assert(mem.isAligned(@ptrToInt(newBlock.ptr()), minAlign));
-    @memcpy(newBlock.ptr(), block.ptr(), block.len());
+    @memcpy(newBlock.ptr(), block.ptr(), std.math.min(block.len(), newLen));
     deallocBlockIfSupported(allocator, block.*);
     block.* = newBlock;
 }
@@ -1630,7 +1630,6 @@ pub fn testBlockAllocator(allocator: var) void {
                         testReadWrite(block.ptr()[0..nextLen], 201);
                         len = nextLen;
                     } else |_| break;
-                    len = nextLen;
                 }
             }}
         }}
