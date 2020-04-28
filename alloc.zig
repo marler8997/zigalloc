@@ -750,8 +750,8 @@ pub const WindowsGlobalHeapAllocator = struct {
 ///
 pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
     const T = @TypeOf(allocator.*);
-    //if (comptime implements(T, "alignForward"))
-    //    @compileError("reallocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not precise.");
+    if (comptime implements(T, "alignForward"))
+        @compileError("reallocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not precise.");
     if (!comptime implements(T, "allocPreciseOverAlignedBlock"))
         @compileError("reallocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not aligned.");
 
@@ -1354,19 +1354,24 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 return slice;
             }
         };
-        /// Takes care of calling allocPreciseBlock or allocOverAlignedBlock based on `alignment`.
+        /// Takes care of calling `alloc` or `allocOverAligned` based on `alignment`.
         pub fn allocAligned(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}![]align(alignment) u8 {
             if (allocAlign <= alignment) return self.alloc(len);
             return self.allocOverAligned(len, allocAlign);
         }
         pub fn dealloc(self: SelfRef, slice: []align(alignment) u8) void {
-            deallocBlockIfSupported(&self.allocator, getBlockRef(slice).blockPtr().*);
+            const blockPtr = getBlockRef(slice).blockPtr();
+            if (storeBlock) {
+                assert(blockPtr.ptr() == slice.ptr);
+                if (T.Block.hasLen) assert(slice.len + allocPadding == blockPtr.len());
+            }
+            deallocBlockIfSupported(&self.allocator, blockPtr.*);
         }
         pub usingnamespace if (!implements(T, "extendBlockInPlace")) struct {
             pub const extendInPlace = void;
         } else struct {
-            pub fn extendInPlace(self: SelfRef, slice: []align(alignment) u8, new_len: usize) error{OutOfMemory}!void {
-                assert(new_len > slice.len);
+            pub fn extendInPlace(self: SelfRef, slice: []align(alignment) u8, newLen: usize) error{OutOfMemory}!void {
+                assert(newLen > slice.len);
 
                 var blockRef = getBlockRef(slice);
                 const blockPtr = blockRef.blockPtr();
@@ -1374,23 +1379,15 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                     assert(slice.ptr == blockPtr.ptr());
                     if (T.Block.hasLen) assert(slice.len + allocPadding == blockPtr.len());
                 }
-                const paddedLen = new_len + allocPadding;
-                const extendNeeded =
-                    if (comptime !storeBlock or !T.Block.hasLen) true
-                    else paddedLen > blockPtr.len();
-
-                if (extendNeeded) {
-                    try self.allocator.extendBlockInPlace(blockPtr, paddedLen);
-                    if (T.Block.hasLen)
-                        assert(blockPtr.len() == paddedLen);
-                }
+                const newPaddedLen = newLen + allocPadding;
+                try self.allocator.extendBlockInPlace(blockPtr, newPaddedLen);
+                if (T.Block.hasLen)
+                    assert(blockPtr.len() == newPaddedLen);
                 if (storeBlock) {
-                    const newBlockPtr = getStoredBlockRef(slice.ptr[0..new_len]);
+                    const newBlockPtr = getStoredBlockRef(slice.ptr[0..newLen]);
                     // NOTE: must be memcpyDown in case of overlap
                     memcpyDown(@ptrCast([*]u8, newBlockPtr), @ptrCast([*]u8, blockPtr), @sizeOf(T.Block));
                     assert(newBlockPtr.ptr() == slice.ptr);
-                    if (T.Block.hasLen)
-                        newBlockPtr.data.setLen(new_len);
                 }
             }
         };
@@ -1403,14 +1400,17 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
                 assert(newLen < slice.len);
                 // make a copy of the block so we don't lose it during the shrink
                 var blockCopy = getStoredBlockRef(slice).*;
-                assert(slice.ptr == blockCopy.ptr());
-                if (T.Block.hasLen)
-                    assert(slice.len + allocPadding == blockCopy.len());
+                if (storeBlock) {
+                    assert(slice.ptr == blockCopy.ptr());
+                    if (T.Block.hasLen) assert(slice.len + allocPadding == blockCopy.len());
+                }
                 const newPaddedLen = newLen + allocPadding;
                 self.allocator.shrinkBlockInPlace(&blockCopy, newPaddedLen);
                 if (T.Block.hasLen)
                     assert(blockCopy.len() == newPaddedLen);
-                getStoredBlockRef(slice.ptr[0..newLen]).* = blockCopy;
+                if (storeBlock) {
+                    getStoredBlockRef(slice.ptr[0..newLen]).* = blockCopy;
+                }
             }
         };
 
