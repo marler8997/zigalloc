@@ -374,8 +374,6 @@ pub fn MakeBlockType(comptime Data: type) type {
             const Buf = if (hasLen) []align(alignment) u8 else [*]align(alignment) u8;
             pub fn initBuf(buf: Buf) Self { return .{ .data = Data.initBuf(buf) }; }
         };
-        // TODO: I'd like to use this instead
-        //pub fn ptr(self: Self) [*]align(alignment) u8 { return self.data.ptrRef().*; }
         pub fn ptr(self: Self) [*]align(alignment) u8 { return self.data.ptr(); }
 
         pub usingnamespace if (!hasLen) struct { } else struct {
@@ -414,17 +412,9 @@ pub fn MakeSimpleBlockType(
         };
 
         pub usingnamespace if (!hasLen) struct {
-            // TODO: can I remove this?
             pub fn ptr(self: Self) [*]align(alignment) u8 { return self.buf; }
-            pub fn ptrRef(self: *Self) *[*]align(alignment) u8 {
-                return &self.buf.ptr;
-            }
         } else struct {
-            // TODO: can I remove this?
             pub fn ptr(self: Self) [*]align(alignment) u8 { return self.buf.ptr; }
-            pub fn ptrRef(self: *Self) *[*]align(alignment) u8 {
-                return *self.buf.ptr;
-            }
             pub fn len(self: Self) usize { return self.buf.len; }
             pub fn setLen(self: *Self, newLen: usize) void { self.buf.len = newLen; }
         };
@@ -958,11 +948,7 @@ pub fn PreciseAllocator(comptime T: type) type {
                 };}
             };
 
-            // TODO: can I remove this?
             pub fn ptr(self: BlockSelf) [*]align(alignment) u8 { return self.forwardBlock.ptr(); }
-            pub fn ptrRef(self: *BlockSelf) *[*]align(alignment) u8 {
-                return self.forwardBlock.data.ptrRef();
-            }
             pub fn len(self: BlockSelf) usize { return self.preciseLen; }
             pub fn setLen(self: *BlockSelf, newLen: usize) void { self.preciseLen = newLen; }
         });
@@ -1112,9 +1098,6 @@ pub fn AlignAllocator(comptime T: type) type {
             };
 
             pub fn ptr(self: BlockSelf) [*]align(alignment) u8 { return self.buf; }
-            pub fn ptrRef(self: *BlockSelf) *[*]align(alignment) u8 {
-                return &self.buf;
-            }
             pub fn len(self: BlockSelf) usize { return self.forwardBlock.len() - getAlignOffsetData(self); }
             pub fn setLen(self: *BlockSelf, newLen: usize) void {
                 self.forwardBlock.setLen(getAlignOffsetData(self.*) + newLen);
