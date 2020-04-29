@@ -509,14 +509,16 @@ pub const MmapAllocator = struct {
     pub const deinitAndDeallocAll = void;
 
     // TODO: move this to std/os/linux.zig
-    fn sys_mremap(old_address: [*]align(mem.page_size) u8, old_size: usize, new_size: usize, flags: usize) usize {
+    pub usingnamespace if (std.Target.current.os.tag != .linux) struct { } else struct {
+        pub fn sys_mremap(old_address: [*]align(mem.page_size) u8, old_size: usize, new_size: usize, flags: usize) usize {
+            return os.linux.syscall4(.mremap, @ptrToInt(old_address), old_size, new_size, flags);
+        }
+    };
+    fn mremap(buf: []align(mem.page_size) u8, new_len: usize, flags: usize) ![*]u8 {
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // TEMPORARY HACK
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        if (std.Target.current.os.tag != .linux) return os.ENOMEM;
-        return os.linux.syscall4(.mremap, @ptrToInt(old_address), old_size, new_size, flags);
-    }
-    fn mremap(buf: []align(mem.page_size) u8, new_len: usize, flags: usize) ![*]u8 {
+        if (std.Target.current.os.tag != .linux) return error.OutOfMemory;
         const rc = sys_mremap(buf.ptr, buf.len, new_len, flags);
         switch (os.linux.getErrno(rc)) {
             0 => return @intToPtr([*]u8, rc),
