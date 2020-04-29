@@ -292,8 +292,12 @@ test "CAllocator" {
     if (!std.builtin.link_libc) return;
     testBlockAllocator(&Alloc.c.init);
     testBlockAllocator(&Alloc.c.aligned().init);
+    testBlockAllocator(&Alloc.c.precise().init);
+    testBlockAllocator(&Alloc.c.aligned().precise().init);
     testSliceAllocator(&Alloc.c.slice().init);
     testSliceAllocator(&Alloc.c.aligned().slice().init);
+    testSliceAllocator(&Alloc.c.precise().slice().init);
+    testSliceAllocator(&Alloc.c.aligned().precise().slice().init);
 }
 test "WindowsHeapAllocator" {
     if (std.Target.current.os.tag != .windows) return;
@@ -900,9 +904,13 @@ pub fn LogAllocator(comptime T: type) type {
         pub usingnamespace if (!implements(T, "cReallocBlock")) struct {
             pub const cReallocBlock = void;
         } else struct {
-            pub fn cReallocBlock(self: SelfRef, block: *Block, currentLen: usize, newLen: usize) error{OutOfMemory}!void {
-                if (T.Block.hasLen) assert(block.len() == currentLen);
-                std.debug.warn("{}: cReallocBlock {}:{} newLen={}\n", .{@typeName(T), block.ptr(), currentLen, newLen});
+            pub fn cReallocBlock(self: SelfRef, block: *Block, newLen: usize) error{OutOfMemory}!void {
+                if (T.Block.hasLen) {
+                    assert(block.len() == currentLen);
+                    std.debug.warn("{}: cReallocBlock {}:{} newLen={}\n", .{@typeName(T), block.ptr(), block.len(), newLen});
+                } else {
+                    std.debug.warn("{}: cReallocBlock {} newLen={}\n", .{@typeName(T), block.ptr(), newLen});
+                }
                 try self.allocator.cReallocBlock(block, newLen);
                 std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
             }
@@ -912,7 +920,7 @@ pub fn LogAllocator(comptime T: type) type {
         } else struct {
             pub fn cReallocAlignedBlock(self: SelfRef, block: *Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
                 std.debug.warn("{}: cReallocBlock {}:{} newLen={} align {} > {}\n", .{@typeName(T), block.ptr(), currentLen, newLen, currentAlign, minAlign});
-                try self.allocator.cReallocBlock(block, newLen);
+                try self.allocator.cReallocAlignedBlock(block, currentLen, newLen, currentAlign, minAlign);
                 std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
             }
         };
@@ -1247,11 +1255,12 @@ pub fn AlignAllocator(comptime T: type) type {
                 assert(isValidAlign(minAlign));
                 assert(minAlign <= currentAlign);
 
+                // TODO: if minAlign < currentAlign, I could try to take back some space instead of calling realloc
                 const maxDropLen = if (minAlign > Block.alignment) minAlign - Block.alignment else 0;
                 const allocLen = newLen + maxDropLen;
                 try self.allocator.cReallocBlock(&block.data.forwardBlock, allocLen);
                 block.data.buf = @alignCast(Block.alignment,
-                    @intToPtr([*]u8, mem.alignForward(@ptrToInt(block.data.forwardBlock.ptr()), Block.alignment))
+                    @intToPtr([*]u8, mem.alignForward(@ptrToInt(block.data.forwardBlock.ptr()), minAlign))
                 );
             }
         };
