@@ -57,7 +57,7 @@
 ///
 /// ### Allocation:
 ///
-///     1. allocBlockAtLeast(lenRef: *usize) error{OutOfMemory}!Block
+///     1. allocBlock(lenRef: *usize) error{OutOfMemory}!Block
 ///        assert(lenRef.* > 0);
 ///        Allocate a block of at least `lenRef.*` bytes.  An allocator should only implement this
 ///        if they might increase the given length, otherwise, it should only implement allocBlockExact.
@@ -69,16 +69,11 @@
 ///        An allocator should only implement this if it can make exact allocations.  Note that
 ///        any allocator can be wrapped with ".exact()" to support this.
 ///
-///     3. getAvailable(block: Block) []u8
-///        Return the full slice of memory available to the block.
+/// ### Aligned Allocation
 ///
-///     4. ??? IDEA: allocMinBlock(len: *usize) error{OutOfMemory}!Block ????
-///        There may be allocators that will allocate even more memory even with an aligned length, and this
-///        length cannot be determined until it's time to perform the allocation. If I come up with an allocator
-///        that does this then I might add this function to the allocator interface. Note that if the block
-///        implements len(), then it's value would have to match the len value returned in `len`.
-///
-/// ### Alignment
+///     Allocator's can declare all blocks to be aligned based on their block pointer's "align(X)" property.
+///     If the caller wants to make an allocation that is more aligned than this, they can call
+///     "allocOverAlignedBlock" or "allocOverAlignedBlockExact" function.
 ///
 ///     * allocOverAlignedBlock(lenRef: *usize, alignment: u29) error{OutOfMemory}!Block
 ///       assert(lenRef.* > 0);
@@ -452,7 +447,7 @@ pub fn MakeSimpleBlockType(
 pub const FailAllocator = struct {
     pub const Block = MakeSimpleBlockType(true, 1, struct {});
 
-    pub fn allocBlockAtLeast(self: @This(), lenRef: *usize) error{OutOfMemory}!Block {
+    pub fn allocBlock(self: @This(), lenRef: *usize) error{OutOfMemory}!Block {
         assert(lenRef.* > 0);
         return error.OutOfMemory;
     }
@@ -486,8 +481,8 @@ pub const FailAllocator = struct {
 pub const CAllocator = struct {
     pub const Block = MakeSimpleBlockType(false, 1, struct {});
 
-    /// We don't get enough information fro the C heap to implement allocBlockAtLeast
-    pub const allocBlockAtLeast = void;
+    /// We don't get enough information fro the C heap to implement allocBlock
+    pub const allocBlock = void;
     pub fn allocBlockExact(self: @This(), len: usize) error{OutOfMemory}!Block {
         assert(len > 0);
         const ptr = std.c.malloc(len) orelse return error.OutOfMemory;
@@ -516,7 +511,7 @@ pub const CAllocator = struct {
 pub const MmapAllocator = struct {
     pub const Block = MakeSimpleBlockType(true, mem.page_size, struct {});
 
-    pub fn allocBlockAtLeast(self: @This(), lenRef: *usize) error{OutOfMemory}!Block {
+    pub fn allocBlock(self: @This(), lenRef: *usize) error{OutOfMemory}!Block {
         const alignedLen = mem.alignForward(lenRef.*, mem.page_size);
         lenRef.* = alignedLen;
         const result = os.mmap(
@@ -623,13 +618,13 @@ pub fn BumpDownAllocator(comptime alignment : u29) type {return struct {
         return Block.initBuf(@alignCast(alignment, self.buf[bufIndex..bufIndex+len]));
     }
     pub usingnamespace if (alignment == 1) struct {
-        pub const allocBlockAtLeast = void;
+        pub const allocBlock = void;
         pub fn allocBlockExact(self: *Self, len: usize) error{OutOfMemory}!Block {
             assert(len > 0);
             return self.commonAllocBlock(len);
         }
     } else struct {
-        pub fn allocBlockAtLeast(self: *Self, lenRef: *usize) error{OutOfMemory}!Block {
+        pub fn allocBlock(self: *Self, lenRef: *usize) error{OutOfMemory}!Block {
             lenRef.* = mem.alignForward(lenRef.*, alignment);
             return self.commonAllocBlock(lenRef.*);
         }
@@ -684,7 +679,7 @@ pub const WindowsHeapAllocator = struct {
     }
 
     // TODO: if we can get the full size actually available from the allocation, we should implement this
-    pub const allocBlockAtLeast = void;
+    pub const allocBlock = void;
     pub fn allocBlockExact(self: @This(), len: usize) error{OutOfMemory}!Block {
         // TODO: use HEAP_NO_SERIALIZE flag if we are single-threaded?
         return self.heapAlloc(len, 0);
@@ -728,7 +723,7 @@ pub const WindowsGlobalHeapAllocator = struct {
         return WindowsHeapAllocator.init(getProcessHeapWindows() catch unreachable);
     }
     // TODO: implement this is we implement it in WindowsHeapAllocator
-    pub const allocBlockAtLeast = WindowsHeapAllocator.allocBlockAtLeast;
+    pub const allocBlock = WindowsHeapAllocator.allocBlock;
     pub fn allocBlockExact(self: @This(), len: usize) error{OutOfMemory}!Block {
         return try getInstance().allocBlockExact(len);
     }
@@ -826,13 +821,13 @@ pub fn LogAllocator(comptime T: type) type {
         pub const Block = T.Block;
         allocator: T,
         pub const alignForward = T.alignForward;
-        pub usingnamespace if (!implements(T, "allocBlockAtLeast")) struct {
-            pub const allocBlockAtLeast = void;
+        pub usingnamespace if (!implements(T, "allocBlock")) struct {
+            pub const allocBlock = void;
         } else struct {
-            pub fn allocBlockAtLeast(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
-                std.debug.warn("{}: allocBlockAtLeast len={}\n", .{@typeName(T), lenRef.*});
-                const result = try self.allocator.allocBlockAtLeast(lenRef);
-                std.debug.warn("{}: allocBlockAtLeast returning {}:{}\n", .{@typeName(T), result.ptr(), lenRef.*});
+            pub fn allocBlock(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
+                std.debug.warn("{}: allocBlock len={}\n", .{@typeName(T), lenRef.*});
+                const result = try self.allocator.allocBlock(lenRef);
+                std.debug.warn("{}: allocBlock returning {}:{}\n", .{@typeName(T), result.ptr(), lenRef.*});
                 return result;
             }
         };
@@ -1159,21 +1154,21 @@ pub fn ExactAllocator(comptime T: type) type {
 
         allocator: T,
 
-        pub usingnamespace if (!implements(T, "allocBlockAtLeast")) struct {
-            pub const allocBlockAtLeast = void;
+        pub usingnamespace if (!implements(T, "allocBlock")) struct {
+            pub const allocBlock = void;
         } else struct {
-            pub fn allocBlockAtLeast(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
-                const block = try self.allocator.allocBlockAtLeast(lenRef);
+            pub fn allocBlock(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
+                const block = try self.allocator.allocBlock(lenRef);
                 return Block.init(.{ .exactLen = lenRef.*, .forwardBlock = block});
             }
         };
 
         pub fn allocBlockExact(self: SelfRef, len: usize) error{OutOfMemory}!Block {
-            // try allocBlockAtLeast first so we can access the full available length
+            // try allocBlock first so we can access the full available length
             const block = initBlock: {
-                if (comptime implements(T, "allocBlockAtLeast")) {
+                if (comptime implements(T, "allocBlock")) {
                     var mutableLen = len;
-                    break :initBlock try self.allocator.allocBlockAtLeast(&mutableLen);
+                    break :initBlock try self.allocator.allocBlock(&mutableLen);
                 }
                 break :initBlock try self.allocator.allocBlockExact(len);
             };
@@ -1340,11 +1335,11 @@ pub fn AlignAllocator(comptime T: type) type {
         }
         fn getAlignOffset(block: Block) usize { return getAlignOffsetData(block.data); }
 
-        pub usingnamespace if (!implements(T, "allocBlockAtLeast")) struct {
-            pub const allocBlockAtLeast = void;
+        pub usingnamespace if (!implements(T, "allocBlock")) struct {
+            pub const allocBlock = void;
         } else struct {
-            pub fn allocBlockAtLeast(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
-                const forwardBlock = try self.allocator.allocBlockAtLeast(lenRef);
+            pub fn allocBlock(self: SelfRef, lenRef: *usize) error{OutOfMemory}!Block {
+                const forwardBlock = try self.allocator.allocBlock(lenRef);
                 return Block.init(.{ .buf = forwardBlock.ptr(), .forwardBlock = forwardBlock });
             }
         };
@@ -1378,7 +1373,7 @@ pub fn AlignAllocator(comptime T: type) type {
             // TODO: instead of (- Block.alignment), (- self.allocator.nextAlignment())
             const maxDropLen = allocAlign - Block.alignment;
             var allocLen = lenRef.* + maxDropLen;
-            const forwardBlock = try allocBlock(&self.allocator, &allocLen);
+            const forwardBlock = try allocBlockCommon(&self.allocator, &allocLen);
             if (T.Block.hasLen) assert(allocLen == forwardBlock.len());
             const alignedPtr = @alignCast(Block.alignment,
                 @intToPtr([*]u8, mem.alignForward(@ptrToInt(forwardBlock.ptr()), allocAlign))
@@ -1686,15 +1681,15 @@ fn memcpyDown(dst: [*]u8, src: [*]u8, len: usize) void {
      }}
 }
 
-/// A convenience function to call allocBlockAtLeast if it exists, otherwise, fall back to allocBlockExact.
-/// allocBlockAtLeast is tried first because it returns more information back to the caller if it is supported.
-pub fn allocBlock(allocator: var, lenRef: *usize) error{OutOfMemory}!@TypeOf(allocator.*).Block {
+/// A convenience function to call allocBlock if it exists, otherwise, fall back to allocBlockExact.
+/// allocBlock is tried first because it returns more information back to the caller if it is supported.
+pub fn allocBlockCommon(allocator: var, lenRef: *usize) error{OutOfMemory}!@TypeOf(allocator.*).Block {
     const T = @TypeOf(allocator.*);
-    if (comptime implements(T, "allocBlockAtLeast")) {
-        return try allocator.allocBlockAtLeast(lenRef);
+    if (comptime implements(T, "allocBlock")) {
+        return try allocator.allocBlock(lenRef);
     } else {
         if (comptime !implements(T, "allocBlockExact"))
-            @compileError(@typeName(T) ++ " does not implement allocBlockExact or allocBlockAtLeast");
+            @compileError(@typeName(T) ++ " does not implement allocBlockExact or allocBlock");
         return try allocator.allocBlockExact(lenRef.*);
     }
 }
@@ -1709,7 +1704,7 @@ pub fn allocAlignedBlock(allocator: var, lenRef: *usize, alignment: u29) error{O
     assert(isValidAlign(alignment));
 
     if (alignment <= T.Block.alignment) {
-        return allocBlock(allocator, lenRef);
+        return allocBlockCommon(allocator, lenRef);
     }
     return allocator.allocOverAlignedBlock(lenRef, alignment);
 }
@@ -1760,10 +1755,10 @@ pub fn testBlockAllocator(allocator: var) void {
             testReadWrite(block.ptr()[0..i], i);
         }}
     }
-    if (comptime implements(T, "allocBlockAtLeast")) {
+    if (comptime implements(T, "allocBlock")) {
         {var i: u8 = 1; while (i < 200) : (i += 17) {
             var len : usize = i;
-            const block = allocator.allocBlockAtLeast(&len) catch continue;
+            const block = allocator.allocBlock(&len) catch continue;
             if (T.Block.hasLen) assert(block.len() == len);
             defer deallocBlockIfSupported(allocator, block);
             testReadWrite(block.ptr()[0..len], i);
@@ -1785,7 +1780,7 @@ pub fn testBlockAllocator(allocator: var) void {
         var i: u8 = 1;
         while (i < 200) : (i += 19) {
             var len : usize = i;
-            const block = allocBlock(allocator, &len) catch break;
+            const block = allocBlockCommon(allocator, &len) catch break;
             testReadWrite(block.ptr()[0..len], i);
         }
         allocator.deallocAll();
@@ -1796,7 +1791,7 @@ pub fn testBlockAllocator(allocator: var) void {
     if (comptime implements(T, "extendBlockInPlace")) {
         {var i: u8 = 1; while (i < 100) : (i += 1) {
             var len : usize = i;
-            var block = allocBlock(allocator, &len) catch continue;
+            var block = allocBlockCommon(allocator, &len) catch continue;
             defer deallocBlockIfSupported(allocator, block);
             testReadWrite(block.ptr()[0..len], 125);
 
@@ -1808,7 +1803,7 @@ pub fn testBlockAllocator(allocator: var) void {
     if (comptime implements(T, "retractBlockInPlace")) {
         {var i: u8 = 2; while (i < 100) : (i += 1) {
             var len : usize = i;
-            var block = allocBlock(allocator, &len) catch continue;
+            var block = allocBlockCommon(allocator, &len) catch continue;
             defer deallocBlockIfSupported(allocator, block);
             testReadWrite(block.ptr()[0..len], 18);
             // TODO: use a loop to slowly retract
@@ -1819,7 +1814,7 @@ pub fn testBlockAllocator(allocator: var) void {
     if (comptime implements(T, "shrinkBlockInPlace")) {
         {var i: u8 = 2; while (i < 100) : (i += 1) {
             var len : usize = i;
-            var block = allocBlock(allocator, &len) catch continue;
+            var block = allocBlockCommon(allocator, &len) catch continue;
             defer deallocBlockIfSupported(allocator, block);
             testReadWrite(block.ptr()[0..len], 18);
             // TODO: use a loop to slowly shrink
