@@ -60,14 +60,14 @@
 ///     1. allocBlock(len: usize) error{OutOfMemory}!Block
 ///        assert(lenRef.* > 0);
 ///        Allocate a block of at least `len` bytes.  An allocator should only implement this
-///        if they might increase the given length, otherwise, it should only implement allocBlockExact.
-///        Note that most allocators will implement this rather than allocBlockExact.
+///        if they might allocate more than the given length, otherwise, it should only implement
+///        allocBlockExact. Most allocators will implement this rather than allocBlockExact.
 ///
 ///     2. getAvailableLen(block: Block) usize
 ///        Return the length of the the memory owned by the given `block` that could be used by the
-///        caller starting from block.ptr(). An allocator should implement this if:
-///           1. the allocator also implements allocBlock
-///           2. the caller cannot retreive the full available length from block.len()
+///        caller starting from block.ptr(). An allocator should only implement if:
+///           1. the allocator can allocate more than requested (if allocBlock is implemented)
+///           2. the caller cannot retreive the available length from block.len()
 ///
 ///     3. getAvailableDownLen(block: Block) usize
 ///        Return the length of the the memory owned by the given `block` that could be used by the
