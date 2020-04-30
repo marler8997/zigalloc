@@ -243,24 +243,33 @@ pub const Alloc = struct {
 pub fn MakeBlockAllocator(comptime T: type) type {return struct {
     init: T,
 
-    ///
-    /// `precise` wraps another allocator.  It adds an extra length field to each block. This extra field enables
+    /// wraps another allocator and adds an extra length field to each block. This extra field enables
     /// allocations of any size (aka "precise allocations") and also enables the "shrinkBockInPlace" operation.
     ///
     /// `precise` should never be wrapped by `aligned`, rather, it should always be the one wrapping `aligned`
     /// (see "Why does PreciseAllocator wrap AlignAllocator instead of the other way around?").
-    ///
     pub fn precise(self: @This()) MakeBlockAllocator(PreciseAllocator(T)) {
         return .{ .init = makePreciseAllocator(self.init) };
     }
 
+    /// wraps another allocator and adds an extra pointer to each block type.  This extra pointer points to an
+    /// address within the memory of the underlying allocator's block memory, usually to an aligned address.
+    /// If an "over aligned" allocation is requested, this allocator will over-allocate memory and track the full
+    /// allocation along with the aligned offset.  Any time it forwards a call to the underlying allocator, it will pass
+    /// the block with full allocation.
     pub fn aligned(self: @This()) MakeBlockAllocator(AlignAllocator(T)) {
         return .{ .init = makeAlignAllocator(self.init) };
     }
+
+    /// wraps another allocator to log every function called on it
     pub fn log(self: @This()) MakeBlockAllocator(LogAllocator(T)) {
         return .{ .init = makeLogAllocator(self.init) };
     }
-    // TODO: sliceForceStore? or shrinkableSlice?
+
+    /// wraps another allocator to create a "slice based" API rather than a "Block based" one.  If the underlying
+    /// allocator's Block type is just a pointer or a slice, then this wrapper just acts as a passthrough, otherwise,
+    /// this allocator will pad allocations with enough memory to store the full Block type necessary to manage
+    /// allocations.
     pub fn slice(self: @This()) MakeSliceAllocator(SliceAllocator(T)) {
         return .{ .init = makeSliceAllocator(self.init) };
     }
