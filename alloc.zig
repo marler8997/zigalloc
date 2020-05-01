@@ -1889,9 +1889,9 @@ pub fn isValidAlign(alignment: u29) bool {
 /// T explicitly disable support by setting it to `void.
 ///
 /// The advantage of requiring every type `T` to explicitly disable a function is that
-/// when new functions are added, every type must address whether or not is is supported.
-/// This also protects the system from typos, because if a function name is mispelled
-/// then it will result in a compile error rather than a runtime bug from the function being
+/// when new functions are added, every type must address whether or not it is supported.
+/// This also protects from typo bugs, because if a function name is mispelled then it
+/// will result in a compile error rather than a runtime bug from the function being
 /// unrecognized.
 ///
 pub fn implements(comptime T: type, comptime name: []const u8) bool {
