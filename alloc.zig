@@ -1151,7 +1151,7 @@ pub fn AlignAllocator(comptime T: type) type {
             }
         };
         pub fn getAvailableDownLen(self: SelfRef, block: Block) usize {
-            return self.getAlignOffset(block);
+            return getAlignOffset(block);
         }
 
         pub fn allocOverAlignedBlock(self: SelfRef, len: usize, allocAlign: u29) error{OutOfMemory}!Block {
