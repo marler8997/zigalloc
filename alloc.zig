@@ -299,7 +299,6 @@ test "CAllocator" {
     testBlockAllocator(&Alloc.c.exact().init);
     testBlockAllocator(&Alloc.c.aligned().exact().init);
     testSliceAllocator(&Alloc.c.slice().init);
-    //testSliceAllocator(&Alloc.c.aligned().slice().init);
     testSliceAllocator(&Alloc.c.exact().slice().init);
     testSliceAllocator(&Alloc.c.aligned().exact().slice().init);
 }
@@ -309,7 +308,6 @@ test "WindowsHeapAllocator" {
     testBlockAllocator(&Alloc.windowsGlobalHeap.aligned().init);
     testBlockAllocator(&Alloc.windowsGlobalHeap.aligned().exact().init);
     testSliceAllocator(&Alloc.windowsGlobalHeap.slice().init);
-    //testSliceAllocator(&Alloc.windowsGlobalHeap.aligned().slice().init);
     testSliceAllocator(&Alloc.windowsGlobalHeap.aligned().exact().slice().init);
     // TODO: test private heaps with HeapAlloc
     //{
@@ -333,14 +331,13 @@ test "BumpDownAllocator" {
     inline for ([_]u29 {1, 2, 4, 8, 16, 32, 64}) |alignment| {
         testBlockAllocator(&Alloc.bumpDown(alignment, &buf).init);
         testBlockAllocator(&Alloc.bumpDown(alignment, &buf).aligned().init);
+        testSliceAllocator(&Alloc.bumpDown(alignment, &buf).aligned().exact().slice().init);
         if (comptime alignment == 1) {
             testSliceAllocator(&Alloc.bumpDown(alignment, &buf).slice().init);
-            //testSliceAllocator(&Alloc.bumpDown(alignment, &buf).aligned().slice().init);
         } else {
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).exact().init);
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).aligned().exact().init);
             testSliceAllocator(&Alloc.bumpDown(alignment, &buf).exact().slice().init);
-            testSliceAllocator(&Alloc.bumpDown(alignment, &buf).aligned().exact().slice().init);
         }
     }
 }
