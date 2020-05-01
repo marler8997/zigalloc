@@ -509,6 +509,7 @@ pub const MmapAllocator = struct {
             os.PROT_READ | os.PROT_WRITE,
             os.MAP_PRIVATE | os.MAP_ANONYMOUS,
             -1, 0) catch return error.OutOfMemory;
+        assert(result.len == alignedLen);
         return Block.initBuf(@alignCast(mem.page_size, result.ptr)[0..alignedLen]);
     }
     pub const getAvailableLen = void; // don't need because it's in block.len()
@@ -526,6 +527,7 @@ pub const MmapAllocator = struct {
     usingnamespace if (std.Target.current.os.tag != .linux) struct { } else struct {
         pub fn sys_mremap(old_address: [*]align(mem.page_size) u8, old_size: usize, new_size: usize, flags: usize) usize {
             return os.linux.syscall4(.mremap, @ptrToInt(old_address), old_size, new_size, flags);
+            //return os.linux.syscall5(.mremap, @ptrToInt(old_address), old_size, new_size, flags, 0);
         }
     };
     fn mremap(buf: []align(mem.page_size) u8, newLen: usize, flags: usize) ![*]u8 {
@@ -534,7 +536,13 @@ pub const MmapAllocator = struct {
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if (std.Target.current.os.tag != .linux) return error.OutOfMemory;
         // mremap causing i386 to segfault for some reason?
-        if (std.Target.current.cpu.arch == .i386) return error.OutOfMemory;
+        // For some reason, if we try to mmap from 8192 to 4096 on qemu, this causes
+        // a segfault????
+        if (std.Target.current.cpu.arch == .i386 or
+            std.Target.current.cpu.arch == .arm) {
+            if (buf.len == 8192 and newLen == 4096)
+                return error.OutOfMemory;
+        }
         const rc = sys_mremap(buf.ptr, buf.len, newLen, flags);
         switch (os.linux.getErrno(rc)) {
             0 => return @intToPtr([*]u8, rc),
