@@ -533,6 +533,8 @@ pub const MmapAllocator = struct {
         // TEMPORARY HACK
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if (std.Target.current.os.tag != .linux) return error.OutOfMemory;
+        // mremap causing i386 to segfault for some reason?
+        if (std.Target.current.cpu.arch == .i386) return error.OutOfMemory;
         const rc = sys_mremap(buf.ptr, buf.len, newLen, flags);
         switch (os.linux.getErrno(rc)) {
             0 => return @intToPtr([*]u8, rc),
