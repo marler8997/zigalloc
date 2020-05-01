@@ -568,12 +568,15 @@ pub const MmapAllocator = struct {
     }
     pub fn extendBlockInPlace(self: @This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
         assert(newLen > block.len());
-        return mremapInPlace(block, newLen);
+        const alignedLen = mem.alignForward(newLen, mem.page_size);
+        return mremapInPlace(block, alignedLen);
     }
     pub fn retractBlockInPlace(self: @This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
         assert(newLen > 0);
         assert(newLen < block.len());
-        return mremapInPlace(block, newLen);
+        const alignedLen = mem.alignForward(newLen, mem.page_size);
+        if (alignedLen >= block.len()) return error.OutOfMemory;
+        return mremapInPlace(block, alignedLen);
     }
     pub const shrinkBlockInPlace = void;
     pub const cReallocBlock = void;
