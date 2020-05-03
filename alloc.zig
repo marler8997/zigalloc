@@ -535,14 +535,6 @@ pub const MmapAllocator = struct {
         // TEMPORARY HACK
         // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if (std.Target.current.os.tag != .linux) return error.OutOfMemory;
-        // mremap causing i386 to segfault for some reason?
-        // For some reason, if we try to mmap from 8192 to 4096 on qemu, this causes
-        // a segfault????
-        if (std.Target.current.cpu.arch == .i386 or
-            std.Target.current.cpu.arch == .arm) {
-            if (buf.len == 8192 and newLen == 4096)
-                return error.OutOfMemory;
-        }
         const rc = sys_mremap(buf.ptr, buf.len, newLen, flags);
         switch (os.linux.getErrno(rc)) {
             0 => return @intToPtr([*]u8, rc),
