@@ -234,9 +234,9 @@ pub const Alloc = struct {
 pub fn MakeBlockAllocator(comptime T: type) type {return struct {
     init: T,
 
-//    pub fn arena(self: @This(), comptime alignment: u29) MakeBlockAllocator(ArenaAllocator(T, alignment)) {
-//        return .{ .init = makeArenaAllocator(alignment, self.init) };
-//    }
+    pub fn arena(self: @This(), comptime alignment: u29) MakeBlockAllocator(ArenaAllocator(T, alignment)) {
+        return .{ .init = makeArenaAllocator(alignment, self.init) };
+    }
 
     /// wraps another allocator and adds an extra length field to each block. This extra field enables
     /// allocations of any size (aka "exact allocations") and also enables the "shrinkBockInPlace" operation.
@@ -338,6 +338,23 @@ test "BumpDownAllocator" {
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).exact().init);
             testBlockAllocator(&Alloc.bumpDown(alignment, &buf).aligned().exact().init);
             testSliceAllocator(&Alloc.bumpDown(alignment, &buf).exact().slice().init);
+        }
+    }
+}
+
+test "ArenaAllocator" {
+    inline for ([_]u29 {1, 2, 4, 8, 16, 32, 64}) |alignment| {
+        if (std.Target.current.os.tag == .linux) {
+            testBlockAllocator(&Alloc.mmap.arena(alignment).init);
+            //testBlockAllocator(&Alloc.mmap.aligned().arena(alignment).init);
+            testBlockAllocator(&Alloc.mmap.arena(alignment).aligned().init);
+            //testBlockAllocator(&Alloc.mmap.aligned().arena(alignment).init);
+        }
+        if (std.Target.current.os.tag == .windows) {
+            testBlockAllocator(&Alloc.windowsGlobalHeap.arena(alignment).init);
+        }
+        if (std.builtin.link_libc) {
+            testBlockAllocator(&Alloc.c.exact().arena(alignment).init);
         }
     }
 }
@@ -801,6 +818,126 @@ pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, c
     deallocBlockIfSupported(allocator, block.*);
     block.* = newBlock;
 }
+
+pub fn makeArenaAllocator(comptime alignment: u29, allocator: var) ArenaAllocator(@TypeOf(allocator), alignment) {
+    return ArenaAllocator(@TypeOf(allocator), alignment).init(allocator);
+}
+pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
+    if (!T.Block.hasLen)
+        @compileError("arena requires that the underlying allocator Block.hasLen is true. You can wrap it with .exact() to support it.");
+    if (implements(T, "allocOverAlignedBlock"))
+        @compileError("not sure if ArenaAllocator should be able to wrap AlignAllocator");
+    return struct {
+        const Self = @This();
+        const BumpAllocator = BumpDownAllocator(alignment);
+        pub const Block = BumpAllocator.Block;
+        const ArenaList = std.SinglyLinkedList(BumpDownAllocator(alignment));
+
+        allocator: T,
+        arena_list: ArenaList,
+
+        pub fn init(allocator: T) @This() {
+            return @This() {
+                .allocator = allocator,
+                .arena_list = ArenaList.init(),
+            };
+        }
+
+        fn getListNode(self: *Self, block: T.Block) *ArenaList.Node {
+            const availableLen = getBlockAvailableLenHasLen(&self.allocator, block);
+            return @intToPtr(*ArenaList.Node,
+                mem.alignBackward(@ptrToInt(block.ptr()) + availableLen - @sizeOf(ArenaList.Node), @alignOf(ArenaList.Node))
+            );
+        }
+
+        pub const isExact = (alignment == 1);
+        const allocPadding =  @sizeOf(ArenaList.Node) + @alignOf(ArenaList.Node) - 1;
+        pub fn allocBlock(self: *Self, len: usize) error{OutOfMemory}!Block {
+            {var it = self.arena_list.first; while (it) |node| : (it = node.next) {
+                return node.data.allocBlock(len) catch continue;
+            }}
+
+            // allocate a new arena
+            // TODO: do I need to add anything else to paddedLen to ensure there is enough
+            //       for in the new BumpDownAllocator for len bytes?
+            var paddedLen = len + @sizeOf(ArenaList.Node) + @alignOf(ArenaList.Node) - 1;
+            //std.debug.warn("arena len={} padded={}\n", .{len, paddedLen});
+            const block = try self.allocator.allocBlock(paddedLen);
+            const node = self.getListNode(block);
+            node.next = self.arena_list.first;
+            self.arena_list.first = node;
+
+            const bufLen = @ptrToInt(node) - @ptrToInt(block.ptr());
+            assert(bufLen >= len);
+            node.* = ArenaList.Node.init(BumpAllocator.init(block.ptr()[0..bufLen]));
+            return node.data.allocBlock(len);
+        }
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // TODO: should this be implemented?
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        pub const getAvailableLen = void;
+
+        // disable unless I determine it's ok for ArenaAllocator to wrap AlignAllocator
+        pub const allocOverAlignedBlock = void;
+
+        // TODO: we could support deallocating the last element of any node
+        pub const deallocBlock = void;
+
+        // TODO: enable this
+        pub const deallocAll = void;
+        //pub fn deallocAll(self: *Self) void {
+        //    @panic ("not impl");
+        //}
+
+        pub usingnamespace if (!implements(T, "deinitAndDeallocAll")) struct {
+            pub const deinitAndDeallocAll = void;
+        } else struct {
+            pub fn deinitAndDeallocAll(self: *Self) void {
+                @panic ("not impl");
+            }
+        };
+        // not supported, maybe I could add some minimal support later
+        pub const extendBlockInPlace = void;
+        // not supported, maybe I could add some minimal support later
+        pub const retractBlockInPlace = void;
+
+        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
+            pub const shrinkBlockInPlace = void;
+        } else struct {
+            // TODO: enable this
+            pub const shrinkBlockInPlace = void;
+            //pub fn shrinkBlockInPlace(self: *Self, block: *Block, newLen: usize) void {
+            //    @panic("not impl");
+            //    //self.allocator.shrinkBlockInPlace(block, newLen);
+            //}
+        };
+
+//        pub usingnamespace if (!implements(T, "cReallocBlock")) struct {
+            pub const cReallocBlock = void;
+//        } else struct {
+//            pub fn cReallocBlock(self: *Self, block: *Block, newLen: usize) error{OutOfMemory}!void {
+//                if (T.Block.hasLen) {
+//                    assert(block.len() == currentLen);
+//                    std.debug.warn("{}: cReallocBlock {}:{} newLen={}\n", .{@typeName(T), block.ptr(), block.len(), newLen});
+//                } else {
+//                    std.debug.warn("{}: cReallocBlock {} newLen={}\n", .{@typeName(T), block.ptr(), newLen});
+//                }
+//                try self.allocator.cReallocBlock(block, newLen);
+//                std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
+//            }
+//        };
+//        pub usingnamespace if (!implements(T, "cReallocAlignedBlock")) struct {
+            pub const cReallocAlignedBlock = void;
+//        } else struct {
+//            pub fn cReallocAlignedBlock(self: *Self, block: *Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
+//                std.debug.warn("{}: cReallocBlock {}:{} newLen={} align {} > {}\n", .{@typeName(T), block.ptr(), currentLen, newLen, currentAlign, minAlign});
+//                try self.allocator.cReallocAlignedBlock(block, currentLen, newLen, currentAlign, minAlign);
+//                std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
+//            }
+//        };
+    };
+}
+
 
 pub fn makeLogAllocator(allocator: var) LogAllocator(@TypeOf(allocator)) {
     return LogAllocator(@TypeOf(allocator)) { .allocator = allocator };
@@ -1492,6 +1629,14 @@ pub fn getBlockAvailableLen(allocator: var, block: @TypeOf(allocator.*).Block, a
         return allocator.getAvailableLen(block);
     if (T.Block.hasLen) return block.len();
     return allocLen;
+}
+
+/// Common function to get the maximum available length for a block from an allocator where Block.hasLen is true
+pub fn getBlockAvailableLenHasLen(allocator: var, block: @TypeOf(allocator.*).Block) usize {
+    const T = @TypeOf(allocator.*);
+    if (comptime implements(T, "getAvailableLen"))
+        return allocator.getAvailableLen(block);
+    return block.len();
 }
 
 /// Takes care of calling allocBlock or allocOverAlignedBlock based on `alignment`.
