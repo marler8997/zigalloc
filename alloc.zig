@@ -148,6 +148,12 @@
 ///
 ///     * TODO: might want to add a method to extend both left and right? expand?
 ///
+/// ### Introspection ?
+///     * UnderlyingAllocator: type
+///       One use case for supporting this is detecting whether AlignAllocator has incorrectly
+///       wrapped an ExactAllocator.  If you could walk down the allocator type heirarchy,
+///       you could verify something like this doesn't happen.
+///
 /// ### Ownership? (How helpful is this?)
 ///
 ///     * IDEA: ownsBlock(block: Block) bool
@@ -850,7 +856,7 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
             );
         }
 
-        pub const isExact = (alignment == 1);
+        pub const isExact = BumpAllocator.isExact;
         const allocPadding =  @sizeOf(ArenaList.Node) + @alignOf(ArenaList.Node) - 1;
         pub fn allocBlock(self: *Self, len: usize) error{OutOfMemory}!Block {
             {var it = self.arena_list.first; while (it) |node| : (it = node.next) {
@@ -872,18 +878,16 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
             node.* = ArenaList.Node.init(BumpAllocator.init(block.ptr()[0..bufLen]));
             return node.data.allocBlock(len);
         }
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        // TODO: should this be implemented?
-        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+        comptime { assert(!implements(BumpAllocator, "getAvailableLen")); }
         pub const getAvailableLen = void;
 
         // disable unless I determine it's ok for ArenaAllocator to wrap AlignAllocator
         pub const allocOverAlignedBlock = void;
 
-        // TODO: we could support deallocating the last element of any node
         pub const deallocBlock = void;
 
-        // TODO: enable this
+        // TODO: implement this
         pub const deallocAll = void;
         //pub fn deallocAll(self: *Self) void {
         //    @panic ("not impl");
@@ -896,45 +900,25 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
                 @panic ("not impl");
             }
         };
-        // not supported, maybe I could add some minimal support later
+        // Not supported if we are using BumpDownAllocator, could support on the
+        // latest block if using BumpUpAllocator
         pub const extendBlockInPlace = void;
-        // not supported, maybe I could add some minimal support later
         pub const retractBlockInPlace = void;
 
-        pub usingnamespace if (!implements(T, "shrinkBlockInPlace")) struct {
-            pub const shrinkBlockInPlace = void;
-        } else struct {
-            // TODO: enable this
-            pub const shrinkBlockInPlace = void;
-            //pub fn shrinkBlockInPlace(self: *Self, block: *Block, newLen: usize) void {
-            //    @panic("not impl");
-            //    //self.allocator.shrinkBlockInPlace(block, newLen);
-            //}
-        };
+        // We can support shrink because we don't support deallocBlock, therefore,
+        // we don't need to know the original length.
+        pub fn shrinkBlockInPlace(self: *Self, block: *Block, newLen: usize) void {
+            block.setLen(newLen);
+        }
 
-//        pub usingnamespace if (!implements(T, "cReallocBlock")) struct {
-            pub const cReallocBlock = void;
-//        } else struct {
-//            pub fn cReallocBlock(self: *Self, block: *Block, newLen: usize) error{OutOfMemory}!void {
-//                if (T.Block.hasLen) {
-//                    assert(block.len() == currentLen);
-//                    std.debug.warn("{}: cReallocBlock {}:{} newLen={}\n", .{@typeName(T), block.ptr(), block.len(), newLen});
-//                } else {
-//                    std.debug.warn("{}: cReallocBlock {} newLen={}\n", .{@typeName(T), block.ptr(), newLen});
-//                }
-//                try self.allocator.cReallocBlock(block, newLen);
-//                std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
-//            }
-//        };
-//        pub usingnamespace if (!implements(T, "cReallocAlignedBlock")) struct {
-            pub const cReallocAlignedBlock = void;
-//        } else struct {
-//            pub fn cReallocAlignedBlock(self: *Self, block: *Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
-//                std.debug.warn("{}: cReallocBlock {}:{} newLen={} align {} > {}\n", .{@typeName(T), block.ptr(), currentLen, newLen, currentAlign, minAlign});
-//                try self.allocator.cReallocAlignedBlock(block, currentLen, newLen, currentAlign, minAlign);
-//                std.debug.warn("{}: cReallocBlock returning {}\n", .{@typeName(T), block.ptr()});
-//            }
-//        };
+        // Because ArenaAllocator can't support resize, I don't think ArenaAllocator
+        // can support these operations
+        comptime {
+            assert(!implements(T, "cReallocBlock"));
+            assert(!implements(T, "cReallocAlignedBlock"));
+        }
+        pub const cReallocBlock = void;
+        pub const cReallocAlignedBlock = void;
     };
 }
 
@@ -1243,8 +1227,9 @@ pub fn AlignAllocator(comptime T: type) type {
         @compileError("refusing to wrap '" ++ @typeName(T) ++ "' with AlignAllocator because it already implements cReallocAlignedBlock");
 
     // SEE NOTE: "Why does ExactAllocator wrap AlignAllocator instead of the other way around?"
-    if (T.isExact and implements(T, "shrinkBlockInPlace"))
-        @compileError("ExactAllocator must wrap AlignAllocator, not the other way around, i.e. .align() must come before .exact()");
+    // The ArenaAllocator messes up this check
+    //if (T.isExact and implements(T, "shrinkBlockInPlace"))
+    //    @compileError("ExactAllocator must wrap AlignAllocator, not the other way around, i.e. .align() must come before .exact()");
 
     return struct {
         const SelfRef = if (@sizeOf(T) == 0) @This() else *@This();
@@ -1387,7 +1372,7 @@ pub fn AlignAllocator(comptime T: type) type {
                 const callShrink = if (comptime !T.Block.hasLen) true
                     else newAlignedLen < block.data.forwardBlock.len();
                 if (callShrink) {
-                    try self.allocator.shrinkBlockInPlace(&block.data.forwardBlock, newAlignedLen);
+                    self.allocator.shrinkBlockInPlace(&block.data.forwardBlock, newAlignedLen);
                     if (T.Block.hasLen) {
                         if (T.isExact) { assert(block.data.forwardBlock.len() == newAlignedLen); }
                         else           { assert(block.data.forwardBlock.len() >= newAlignedLen); }
