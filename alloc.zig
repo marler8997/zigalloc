@@ -641,7 +641,8 @@ pub fn BumpDownAllocator(comptime alignment : u29) type {return struct {
     pub const allocOverAlignedBlock = void;
     pub fn deallocBlock(self: *@This(), block: Block) void {
         if (self.bumpIndex == self.getBlockIndex(block)) {
-            self.bumpIndex += mem.alignForward(block.len(), alignment);
+            assert(mem.isAligned(block.len(), alignment));
+            self.bumpIndex += block.len();
         }
     }
     pub fn deallocAll(self: *@This()) void {
