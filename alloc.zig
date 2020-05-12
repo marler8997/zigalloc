@@ -371,6 +371,14 @@ test "ArenaAllocator" {
 
 test "MemAllocator" {
     testBlockAllocator(&Alloc.mem(std.heap.page_allocator).init);
+    testBlockAllocator(&Alloc.mem(std.heap.page_allocator).exact().init);
+    testBlockAllocator(&Alloc.mem(std.heap.page_allocator).arena(1).init);
+    testBlockAllocator(&Alloc.mem(std.heap.page_allocator).exact().arena(1).init);
+
+    testSliceAllocator(&Alloc.mem(std.heap.page_allocator).slice().init);
+    testSliceAllocator(&Alloc.mem(std.heap.page_allocator).exact().slice().init);
+    testSliceAllocator(&Alloc.mem(std.heap.page_allocator).arena(1).slice().init);
+    testSliceAllocator(&Alloc.mem(std.heap.page_allocator).exact().arena(1).slice().init);
 }
 
 /// Create a Block type from the given block Data type.
@@ -835,8 +843,8 @@ pub fn makeArenaAllocator(comptime alignment: u29, allocator: var) ArenaAllocato
 pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
     if (!T.Block.hasLen)
         @compileError("arena requires that the underlying allocator Block.hasLen is true. You can wrap it with .exact() to support it.");
-    if (implements(T, "allocOverAlignedBlock"))
-        @compileError("not sure if ArenaAllocator should be able to wrap AlignAllocator");
+    //if (implements(T, "allocOverAlignedBlock"))
+    //    @compileError("not sure if ArenaAllocator should be able to wrap AlignAllocator");
     return struct {
         const Self = @This();
         const BumpAllocator = BumpDownAllocator(alignment);
@@ -917,10 +925,11 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
 
         // Because ArenaAllocator can't support resize, I don't think ArenaAllocator
         // can support these operations
-        comptime {
-            assert(!implements(T, "cReallocBlock"));
-            assert(!implements(T, "cReallocAlignedBlock"));
-        }
+        // TODO: should we assert an error if the underlying allocator implements these?
+        //comptime {
+        //    assert(!implements(T, "cReallocBlock"));
+        //    assert(!implements(T, "cReallocAlignedBlock"));
+        //}
         pub const cReallocBlock = void;
         pub const cReallocAlignedBlock = void;
     };
@@ -1633,7 +1642,8 @@ pub const MemAllocator = struct {
     // to disable this for now
     pub const shrinkBlockInPlace = void;
     pub fn cReallocBlock(self: *MemAllocator, block: *Block, newLen: usize) error{OutOfMemory}!void {
-        const slice = try self.allocator.reallocFn(self.allocator, block.data.buf, block.data.alignment, len, 1);
+        const slice = try self.allocator.reallocFn(self.allocator, block.data.buf, block.data.extra.alignment, newLen, 1);
+        assert(slice.len == newLen);
         block.* = Block { .data = .{ .buf = slice, .extra = .{.alignment = 1} } };
     }
     pub fn cReallocAlignedBlock(self: *MemAllocator, block: *Block, currentLen: usize, newLen: usize,
