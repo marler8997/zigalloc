@@ -502,7 +502,6 @@ pub const CAllocator = struct {
     pub const getAvailableLen = void;
     pub const getAvailableDownLen = void;
     pub const allocOverAlignedBlock = void;
-    pub const allocOverAlignedBlockExact = void;
     pub fn deallocBlock(self: @This(), block: Block) void {
         std.c.free(block.ptr());
     }
@@ -537,9 +536,7 @@ pub const MmapAllocator = struct {
     }
     pub const getAvailableLen = void; // don't need because it's in block.len()
     pub const getAvailableDownLen = void;
-    pub const allocBlockExact = void;
     pub const allocOverAlignedBlock = void;
-    pub const allocOverAlignedBlockExact = void;
     pub fn deallocBlock(self: @This(), block: Block) void {
         os.munmap(block.data.buf);
     }
@@ -642,7 +639,6 @@ pub fn BumpDownAllocator(comptime alignment : u29) type {return struct {
     pub const getAvailableLen = void; // don't need because it will be in block.len
     pub const getAvailableDownLen = void;
     pub const allocOverAlignedBlock = void;
-    pub const allocOverAlignedBlockExact = void;
     pub fn deallocBlock(self: *@This(), block: Block) void {
         if (self.bumpIndex == self.getBlockIndex(block)) {
             self.bumpIndex += mem.alignForward(block.len(), alignment);
@@ -741,7 +737,6 @@ pub const WindowsGlobalHeapAllocator = struct {
     pub const getAvailableLen = void;
     pub const getAvailableDownLen = void;
     pub const allocOverAlignedBlock = void;
-    pub const allocOverAlignedBlockExact = void;
     pub fn deallocBlock(self: @This(), block: Block) void {
         getInstance().deallocBlock(block);
     }
