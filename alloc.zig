@@ -232,6 +232,10 @@ pub const Alloc = struct {
         return .{ .init = makeBumpDownAllocator(alignment, buf) };
     }
 
+    pub fn mem(allocator: *mem.Allocator) MakeBlockAllocator(MemAllocator) {
+        return .{ .init = MemAllocator.init(allocator) };
+    }
+
     // Support method call syntax to add custom allocators.
     pub fn custom(allocator: var) MakeBlockAllocator(@TypeOf(allocator)) {
         return .{ .init = allocator };
@@ -363,6 +367,10 @@ test "ArenaAllocator" {
             testBlockAllocator(&Alloc.c.exact().arena(alignment).init);
         }
     }
+}
+
+test "MemAllocator" {
+    testBlockAllocator(&Alloc.mem(std.heap.page_allocator).init);
 }
 
 /// Create a Block type from the given block Data type.
@@ -1589,6 +1597,60 @@ pub fn SliceAllocatorGeneric(comptime T: type, comptime storeBlock : bool) type 
         };
     };
 }
+
+/// Wraps a runtime mem.Allocator instance using the new alloc.zig generic interface
+pub const MemAllocator = struct {
+    allocator: *mem.Allocator,
+    pub fn init(allocator: *mem.Allocator) MemAllocator { return .{ .allocator = allocator }; }
+
+    pub const Block = MakeSimpleBlockType(true, 1, struct {alignment: u29});
+    pub const isExact = true;
+    pub fn allocBlock(self: *MemAllocator, len: usize) error{OutOfMemory}!Block {
+        assert(len > 0);
+        const slice = try self.allocator.reallocFn(self.allocator, &[0]u8{}, undefined, len, 1);
+        return Block { .data = .{ .buf = slice, .extra = .{.alignment = 1} } };
+    }
+    pub const getAvailableLen = void;
+    pub const getAvailableDownLen = void;
+    pub fn allocOverAlignedBlock(self: *MemAllocator, len: usize, alignment: u29) error{OutOfMemory}!Block {
+        assert(len > 0);
+        assert(alignment > 1);
+        const slice = try self.allocator.reallocFn(self.allocator, &[0]u8{}, undefined, len, alignment);
+        return Block { .data = .{ .buf = slice, .extra = .{.alignment = alignment} } };
+    }
+    pub fn deallocBlock(self: *MemAllocator, block: Block) void {
+        _ = self.allocator.shrinkFn(self.allocator, block.data.buf, block.data.extra.alignment, 0, 1);
+    }
+    pub const deallocAll = void;
+    pub const deinitAndDeallocAll = void;
+    // there's currently no way to guarantee that reallocFn will remain in place, so we
+    // have to disable this for now
+    pub const extendBlockInPlace = void;
+    // there's currently no way to guarantee that reallocFn/shrinkFn will remain in place, so we
+    // have to disable this for now
+    pub const retractBlockInPlace = void;
+    // there's currently no way to guarantee that shrinkFn will remain in place, so we have
+    // to disable this for now
+    pub const shrinkBlockInPlace = void;
+    pub fn cReallocBlock(self: *MemAllocator, block: *Block, newLen: usize) error{OutOfMemory}!void {
+        const slice = try self.allocator.reallocFn(self.allocator, block.data.buf, block.data.alignment, len, 1);
+        block.* = Block { .data = .{ .buf = slice, .extra = .{.alignment = 1} } };
+    }
+    pub fn cReallocAlignedBlock(self: *MemAllocator, block: *Block, currentLen: usize, newLen: usize,
+        currentAlign: u29, minAlign: u29
+    ) error{OutOfMemory}!void {
+        assert(currentLen == block.len());
+        assert(newLen > 0);
+        assert(currentLen != newLen);
+        assert(isValidAlign(currentAlign));
+        assert(mem.isAligned(@ptrToInt(block.ptr()), currentAlign));
+        assert(isValidAlign(minAlign));
+        assert(minAlign <= currentAlign);
+        assert(currentLen == block.len());
+        const slice = try self.allocator.reallocFn(self.allocator, block.data.buf, block.data.extra.alignment, newLen, minAlign);
+        block.* = Block { .data = .{ .buf = slice, .extra = .{.alignment = 1} } };
+    }
+};
 
 /// TODO: these shouldn't be in this module
 fn memcpyUp(dst: [*]u8, src: [*]u8, len: usize) void {
