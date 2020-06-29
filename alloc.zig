@@ -514,15 +514,32 @@ pub const FailAllocator = struct {
 };
 
 pub const CAllocator = struct {
-    pub const Block = MakeSimpleBlockType(false, 1, struct {});
+    const Self = @This();
+    usingnamespace if (comptime @hasDecl(std.c, "malloc_size")) struct {
+        pub const supports_malloc_size = true;
+        pub const malloc_size = std.c.malloc_size;
+    } else if (comptime @hasDecl(std.c, "malloc_usable_size")) struct {
+        pub const supports_malloc_size = true;
+        pub const malloc_size = std.c.malloc_usable_size;
+    } else struct {
+        pub const supports_malloc_size = false;
+    };
+
+    pub const Block = MakeSimpleBlockType(false, 8, struct {});
 
     pub const isExact = true;
     pub fn allocBlock(self: @This(), len: usize) error{OutOfMemory}!Block {
         assert(len > 0);
         const ptr = std.c.malloc(len) orelse return error.OutOfMemory;
-        return Block.initBuf(@ptrCast([*]u8, ptr));
+        return Block.initBuf(@ptrCast([*]u8, @alignCast(8, ptr)));
     }
-    pub const getAvailableLen = void;
+    pub usingnamespace if (!supports_malloc_size) struct {
+        pub const getAvailableLen = void;
+    } else struct {
+        pub fn getAvailableLen(self: Self, block: Block) usize {
+            return malloc_size(block.ptr());
+        }
+    };
     pub const getAvailableDownLen = void;
     pub const allocOverAlignedBlock = void;
     pub fn deallocBlock(self: @This(), block: Block) void {
@@ -537,7 +554,7 @@ pub const CAllocator = struct {
         assert(newLen > 0);
         const ptr = std.c.realloc(block.ptr(), newLen)
             orelse return error.OutOfMemory;
-        block.* = Block.initBuf(@ptrCast([*]u8, ptr));
+        block.* = Block.initBuf(@ptrCast([*]align(8) u8, @alignCast(8, ptr)));
     }
     pub const cReallocAlignedBlock = void;
 };
@@ -1290,8 +1307,7 @@ pub fn AlignAllocator(comptime T: type) type {
             pub const getAvailableLen = void;
         } else struct {
             pub fn getAvailableLen(self: SelfRef, block: Block) usize {
-                @compileError("I'm not sure this should be possible if AlignAllocator cannot wrap ExactAllocator");
-                return block.forwardBlock.getAvailableLen(block.fowardBlock) - getAlignOffset(block);
+                return self.allocator.getAvailableLen(block.data.forwardBlock) - getAlignOffset(block);
             }
         };
         pub fn getAvailableDownLen(self: SelfRef, block: Block) usize {
