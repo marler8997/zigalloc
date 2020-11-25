@@ -237,7 +237,7 @@ pub const Alloc = struct {
     }
 
     // Support method call syntax to add custom allocators.
-    pub fn custom(allocator: var) MakeBlockAllocator(@TypeOf(allocator)) {
+    pub fn custom(allocator: anytype) MakeBlockAllocator(@TypeOf(allocator)) {
         return .{ .init = allocator };
     }
 };
@@ -281,7 +281,7 @@ pub fn MakeBlockAllocator(comptime T: type) type {return struct {
 
     // TODO: can't get this to work yet
     // Support method call syntax to add custom allocators.
-    //pub fn custom(self: @This(), wrapperTypeFunc: var) MakeBlockAllocator(@typeInfo(@TypeOf(wrapperTypeFunc)).Fn.return_type.?) {
+    //pub fn custom(self: @This(), wrapperTypeFunc: anytype) MakeBlockAllocator(@typeInfo(@TypeOf(wrapperTypeFunc)).Fn.return_type.?) {
     //    @compileLog(@TypeOf(wrapperTypeFunc));
     //    return .{ .init = @call(.{}, @typeInfo(@TypeOf(wrapperTypeFunc)).Fn.return_type.?, .{self} ) };
     //}
@@ -436,7 +436,7 @@ pub fn MakeBlockType(comptime Data: type) type {
             self: @This(),
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
-            out_stream: var
+            out_stream: anytype
         ) !void {
             if (comptime hasLen) {
                 try std.fmt.format(out_stream, "{}:{}", .{self.ptr(), self.len()});
@@ -813,7 +813,7 @@ pub const WindowsGlobalHeapAllocator = struct {
 ///
 /// This function is only supported for "exact" allocators.
 ///
-pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
+pub fn reallocAlignedBlock(allocator: anytype, block: *@TypeOf(allocator.*).Block, currentLen: usize, newLen: usize, currentAlign: u29, minAlign: u29) error{OutOfMemory}!void {
     const T = @TypeOf(allocator.*);
     if (!T.isExact)
         @compileError("reallocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not exact.");
@@ -861,7 +861,7 @@ pub fn reallocAlignedBlock(allocator: var, block: *@TypeOf(allocator.*).Block, c
     block.* = newBlock;
 }
 
-pub fn makeArenaAllocator(comptime alignment: u29, allocator: var) ArenaAllocator(@TypeOf(allocator), alignment) {
+pub fn makeArenaAllocator(comptime alignment: u29, allocator: anytype) ArenaAllocator(@TypeOf(allocator), alignment) {
     return ArenaAllocator(@TypeOf(allocator), alignment).init(allocator);
 }
 pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
@@ -911,7 +911,7 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
 
             const bufLen = @ptrToInt(node) - @ptrToInt(block.ptr());
             assert(bufLen >= len);
-            node.* = ArenaList.Node.init(BumpAllocator.init(block.ptr()[0..bufLen]));
+            node.* = ArenaList.Node { .data = BumpAllocator.init(block.ptr()[0..bufLen]) };
             return node.data.allocBlock(len);
         }
 
@@ -960,7 +960,7 @@ pub fn ArenaAllocator(comptime T: type, comptime alignment: u29) type {
 }
 
 
-pub fn makeLogAllocator(allocator: var) LogAllocator(@TypeOf(allocator)) {
+pub fn makeLogAllocator(allocator: anytype) LogAllocator(@TypeOf(allocator)) {
     return LogAllocator(@TypeOf(allocator)) { .allocator = allocator };
 }
 // TODO: log to an output stream rather than directly to stderr
@@ -1077,7 +1077,7 @@ pub fn LogAllocator(comptime T: type) type {
 }
 
 
-pub fn makeExactAllocator(allocator: var) ExactAllocator(@TypeOf(allocator)) {
+pub fn makeExactAllocator(allocator: anytype) ExactAllocator(@TypeOf(allocator)) {
     return ExactAllocator(@TypeOf(allocator)) { .allocator = allocator };
 }
 pub fn ExactAllocator(comptime T: type) type {
@@ -1254,7 +1254,7 @@ pub fn ExactAllocator(comptime T: type) type {
     };
 }
 
-pub fn makeAlignAllocator(allocator: var) AlignAllocator(@TypeOf(allocator)) {
+pub fn makeAlignAllocator(allocator: anytype) AlignAllocator(@TypeOf(allocator)) {
     return AlignAllocator(@TypeOf(allocator)) { .allocator = allocator };
 }
 pub fn AlignAllocator(comptime T: type) type {
@@ -1449,7 +1449,7 @@ pub fn AlignAllocator(comptime T: type) type {
 //       rather than a "slice-based" API.
 
 /// Create a SliceAllocator from a BlockAllocator.
-pub fn makeSliceAllocator(allocator: var) SliceAllocator(@TypeOf(allocator)) {
+pub fn makeSliceAllocator(allocator: anytype) SliceAllocator(@TypeOf(allocator)) {
     return SliceAllocator(@TypeOf(allocator)) {
         .allocator = allocator,
     };
@@ -1460,7 +1460,7 @@ pub fn SliceAllocator(comptime T: type) type {
 
 /// NOTE: if the underlying Block type has no extra data, then storing the block isn't necessary, however,
 ///       the user may choose to store it anyway to support shrinkInPlace or provide extra sanity checking.
-pub fn makeSliceAllocatorGeneric(allocator: var, comptime storeBlock: bool) SliceAllocatorGeneric(@TypeOf(allocator), storeBlock) {
+pub fn makeSliceAllocatorGeneric(allocator: anytype, comptime storeBlock: bool) SliceAllocatorGeneric(@TypeOf(allocator), storeBlock) {
     return SliceAllocatorGeneric(@TypeOf(allocator), storeBlock) {
         .allocator = allocator,
     };
@@ -1635,33 +1635,33 @@ pub fn MemAllocator(comptime exact: bool) type { return struct {
     allocator: *mem.Allocator,
     pub fn init(allocator: *mem.Allocator) @This() { return .{ .allocator = allocator }; }
 
-    pub const Block = MakeSimpleBlockType(true, 1, struct {});
+    pub const Block = MakeSimpleBlockType(true, 1, struct {buf_align: u29});
     pub const isExact = exact;
     pub fn allocBlock(self: *@This(), len: usize) error{OutOfMemory}!Block {
         assert(len > 0);
-        const slice = try self.allocator.callAllocFn(len, 1, if (isExact) 0 else 1);
-        return Block { .data = .{ .buf = slice, .extra = .{} }};
+        const slice = try self.allocator.allocFn(self.allocator, len, 1, if (isExact) 0 else 1, 0);
+        return Block { .data = .{ .buf = slice, .extra = .{ .buf_align = 1 } }};
     }
     pub const getAvailableLen = void;
     pub const getAvailableDownLen = void;
     pub fn allocOverAlignedBlock(self: *@This(), len: usize, alignment: u29) error{OutOfMemory}!Block {
         assert(len > 0);
         assert(alignment > 1);
-        const slice = try self.allocator.callAllocFn(len, alignment, if (isExact) 0 else 1);
-        return Block { .data = .{ .buf = slice, .extra = .{} }};
+        const slice = try self.allocator.allocFn(self.allocator, len, alignment, if (isExact) 0 else 1, 0);
+        return Block { .data = .{ .buf = slice, .extra = .{ .buf_align = alignment } }};
     }
     pub fn deallocBlock(self: *@This(), block: Block) void {
-        _ = self.allocator.shrinkBytes(block.data.buf, 0, 0);
+        _ = self.allocator.shrinkBytes(block.data.buf, block.data.extra.buf_align, 0, 0, 0);
     }
     pub const deallocAll = void;
     pub const deinitAndDeallocAll = void;
     pub fn extendBlockInPlace(self: *@This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
-        block.setLen(try self.allocator.callResizeFn(block.data.buf, newLen, if (isExact) 0 else 1));
+        block.setLen(try self.allocator.resizeFn(self.allocator, block.data.buf, block.data.extra.buf_align, newLen, if (isExact) 0 else 1, 0));
     }
     /// std.mem.Allocator always succeeds when shrinking, so we only need to support shrink, not retract
     pub const retractBlockInPlace = void;
     pub fn shrinkBlockInPlace(self: *@This(), block: *Block, newLen: usize) void {
-        block.setLen(self.allocator.shrinkBytes(block.data.buf, newLen, if (isExact) 0 else 1));
+        block.setLen(self.allocator.shrinkBytes(block.data.buf, block.data.extra.buf_align, newLen, if (isExact) 0 else 1, 0));
     }
     pub const cReallocBlock = void;
 //    pub fn cReallocBlock(self: *@This(), block: *Block, newLen: usize) error{OutOfMemory}!void {
@@ -1700,7 +1700,7 @@ fn memcpyDown(dst: [*]u8, src: [*]u8, len: usize) void {
 }
 
 /// Common function to get the maximum available length for a block from any allocator
-pub fn getBlockAvailableLen(allocator: var, block: @TypeOf(allocator.*).Block, allocLen: usize) usize {
+pub fn getBlockAvailableLen(allocator: anytype, block: @TypeOf(allocator.*).Block, allocLen: usize) usize {
     const T = @TypeOf(allocator.*);
     if (comptime implements(T, "getAvailableLen"))
         return allocator.getAvailableLen(block);
@@ -1709,7 +1709,7 @@ pub fn getBlockAvailableLen(allocator: var, block: @TypeOf(allocator.*).Block, a
 }
 
 /// Common function to get the maximum available length for a block from an allocator where Block.hasLen is true
-pub fn getBlockAvailableLenHasLen(allocator: var, block: @TypeOf(allocator.*).Block) usize {
+pub fn getBlockAvailableLenHasLen(allocator: anytype, block: @TypeOf(allocator.*).Block) usize {
     const T = @TypeOf(allocator.*);
     if (comptime implements(T, "getAvailableLen"))
         return allocator.getAvailableLen(block);
@@ -1717,7 +1717,7 @@ pub fn getBlockAvailableLenHasLen(allocator: var, block: @TypeOf(allocator.*).Bl
 }
 
 /// Takes care of calling allocBlock or allocOverAlignedBlock based on `alignment`.
-pub fn allocAlignedBlock(allocator: var, len: usize, alignment: u29) error{OutOfMemory}!@TypeOf(allocator.*).Block {
+pub fn allocAlignedBlock(allocator: anytype, len: usize, alignment: u29) error{OutOfMemory}!@TypeOf(allocator.*).Block {
     const T = @TypeOf(allocator.*);
     if (comptime !implements(T, "allocOverAlignedBlock"))
         @compileError("allocAlignedBlock cannot be called on '" ++ @typeName(T) ++ "' because it is not aligned.  Wrap it with .aligned()");
@@ -1729,7 +1729,7 @@ pub fn allocAlignedBlock(allocator: var, len: usize, alignment: u29) error{OutOf
 }
 
 /// Call deallocBlock only if it is supported by the given allocator, otherwise, do nothing.
-pub fn deallocBlockIfSupported(allocator: var, block: @TypeOf(allocator.*).Block) void {
+pub fn deallocBlockIfSupported(allocator: anytype, block: @TypeOf(allocator.*).Block) void {
     if (comptime implements(@TypeOf(allocator.*), "deallocBlock")) {
         allocator.deallocBlock(block);
     }
@@ -1752,7 +1752,7 @@ pub fn testReadWrite(slice: []u8, seed: u8) void {
     }}
 }
 
-pub fn testBlockAllocator(allocator: var) void {
+pub fn testBlockAllocator(allocator: anytype) void {
     const T = @TypeOf(allocator.*);
     if (comptime implements(T, "allocBlock")) {
         {var i: u8 = 1; while (i < 200) : (i += 17) {
@@ -1880,7 +1880,7 @@ pub fn testBlockAllocator(allocator: var) void {
     }
 }
 
-fn testSliceAllocator(allocator: var) void {
+fn testSliceAllocator(allocator: anytype) void {
     const T = @TypeOf(allocator.*);
     {var i: u8 = 1; while (i < 200) : (i += 14) {
         const slice = allocator.alloc(i) catch continue;
